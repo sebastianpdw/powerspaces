@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 470" width="1000" height="470" role="img" aria-label="Before and after: without Powerspaces you get yanked to another desktop; with Powerspaces the app opens on the desktop you're on">
+  <defs>
+    <linearGradient id="wpA" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FDE9D2"/><stop offset="1" stop-color="#F7CBA0"/></linearGradient>
+    <linearGradient id="wpB" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#E7DEFC"/><stop offset="1" stop-color="#C9B6F6"/></linearGradient>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#2a2a35" flood-opacity="0.12"/></filter>
+  </defs>
+  <rect width="1000" height="470" fill="#F6F4FC"/>
+
+  <!-- ============ LEFT: WITHOUT ============ -->
+  <g filter="url(#sh)"><rect x="24" y="24" width="452" height="422" rx="18" fill="#FFFFFF" stroke="#FBD9D6"/></g>
+  <text x="48" y="60" font-family="-apple-system,'SF Pro Display',Arial,sans-serif" font-size="20" font-weight="800" fill="#FF3B30">Without Powerspaces</text>
+  <text x="48" y="84" font-family="-apple-system,Arial,sans-serif" font-size="13" fill="#6E6E73">You click the Chat app — it lives on Desktop 1…</text>
+
+  <!-- yank arrow (Desktop 2 -> Desktop 1), in the band above the desktops -->
+  <path d="M300 150 C250 106 180 106 152 148" fill="none" stroke="#FF3B30" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M152 150 l13 -1 l-9 -8 z" fill="#FF3B30"/>
+  <g transform="translate(226,112)"><rect x="-40" y="-15" width="80" height="30" rx="15" fill="#FF3B30"/><text x="0" y="5" text-anchor="middle" font-family="Arial,sans-serif" font-size="13" font-weight="800" fill="#fff">YANK!</text></g>
+
+  <!-- Desktop 1 (gets the focus = yanked here) -->
+  <g transform="translate(48,150)">
+    <rect width="186" height="118" rx="10" fill="url(#wpA)" stroke="#5733CC" stroke-width="3"/>
+    <text x="10" y="22" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#7a5a32">Desktop 1</text>
+    <rect x="40" y="36" width="106" height="58" rx="8" fill="#FFFFFF" stroke="#E1E6F0"/>
+    <rect x="40" y="36" width="106" height="15" rx="8" fill="#16B5A6"/><rect x="40" y="44" width="106" height="7" fill="#16B5A6"/>
+    <circle cx="51" cy="43" r="3" fill="#fff"/>
+    <text x="93" y="80" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="700" fill="#16B5A6">Chat</text>
+  </g>
+  <!-- Desktop 2 (where you started) -->
+  <g transform="translate(266,150)">
+    <rect width="186" height="118" rx="10" fill="url(#wpB)" opacity="0.8"/>
+    <text x="10" y="22" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#4a3a72">Desktop 2 · you were here</text>
+    <rect x="33" y="84" width="120" height="26" rx="9" fill="#1D1D1F" opacity="0.82"/>
+    <rect x="42" y="90" width="14" height="14" rx="4" fill="#5C8FFC"/>
+    <rect x="62" y="90" width="14" height="14" rx="4" fill="#16B5A6"/>
+    <rect x="82" y="90" width="14" height="14" rx="4" fill="#FF9F0A"/>
+    <rect x="102" y="90" width="14" height="14" rx="4" fill="#AF52DE"/>
+    <g transform="translate(64,97)" fill="#1D1D1F" stroke="#fff" stroke-width="1.2"><path d="M0,0 L0,16 L4.2,12 L7,18 L9.2,17 L6.5,11 L12,11 Z"/></g>
+  </g>
+
+  <g transform="translate(48,300)">
+    <rect width="404" height="80" rx="12" fill="#FFF1F0"/>
+    <text x="22" y="34" font-family="-apple-system,Arial,sans-serif" font-size="15" font-weight="700" fill="#C92A20">macOS teleports you to Desktop 1.</text>
+    <text x="22" y="58" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#9a4640">Your work on Desktop 2 vanishes from view.</text>
+  </g>
+
+  <!-- ============ RIGHT: WITH ============ -->
+  <g filter="url(#sh)"><rect x="524" y="24" width="452" height="422" rx="18" fill="#FFFFFF" stroke="#CBEBD5"/></g>
+  <text x="548" y="60" font-family="-apple-system,'SF Pro Display',Arial,sans-serif" font-size="20" font-weight="800" fill="#248A3D">With Powerspaces</text>
+  <text x="548" y="84" font-family="-apple-system,Arial,sans-serif" font-size="13" fill="#6E6E73">You click the Chat app from Desktop 2…</text>
+
+  <!-- opens-here indicator into Desktop 2 -->
+  <g transform="translate(859,112)"><rect x="-56" y="-15" width="112" height="30" rx="15" fill="#34C759"/><text x="0" y="5" text-anchor="middle" font-family="Arial,sans-serif" font-size="12.5" font-weight="800" fill="#fff">OPENS HERE</text></g>
+  <path d="M859 128 V146" stroke="#34C759" stroke-width="3" stroke-linecap="round"/>
+  <path d="M859 150 l5 -9 l-10 0 z" fill="#34C759"/>
+
+  <!-- Desktop 1 (untouched) -->
+  <g transform="translate(548,150)">
+    <rect width="186" height="118" rx="10" fill="url(#wpA)" opacity="0.5"/>
+    <text x="10" y="22" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#7a5a32">Desktop 1</text>
+    <rect x="40" y="36" width="106" height="58" rx="8" fill="#FFFFFF" stroke="#E1E6F0" opacity="0.7"/>
+    <text x="93" y="70" text-anchor="middle" font-family="Arial,sans-serif" font-size="12" font-weight="600" fill="#16B5A6" opacity="0.8">Chat</text>
+  </g>
+  <!-- Desktop 2 (stays current, new Chat window opens here) -->
+  <g transform="translate(766,150)">
+    <rect width="186" height="118" rx="10" fill="url(#wpB)" stroke="#34C759" stroke-width="3"/>
+    <text x="10" y="22" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#4a3a72">Desktop 2 · you stay here</text>
+    <rect x="40" y="32" width="106" height="52" rx="8" fill="#FFFFFF" stroke="#34C759" stroke-width="1.5"/>
+    <rect x="40" y="32" width="106" height="15" rx="8" fill="#16B5A6"/><rect x="40" y="40" width="106" height="7" fill="#16B5A6"/>
+    <circle cx="51" cy="39" r="3" fill="#fff"/>
+    <text x="93" y="70" text-anchor="middle" font-family="Arial,sans-serif" font-size="11" font-weight="700" fill="#16B5A6">Chat (new)</text>
+    <rect x="33" y="92" width="120" height="22" rx="8" fill="#1D1D1F" opacity="0.82"/>
+    <rect x="42" y="96" width="14" height="14" rx="4" fill="#5C8FFC"/>
+    <rect x="62" y="96" width="14" height="14" rx="4" fill="#16B5A6"/>
+    <rect x="82" y="96" width="14" height="14" rx="4" fill="#FF9F0A"/>
+    <g transform="translate(64,103)" fill="#1D1D1F" stroke="#fff" stroke-width="1.2"><path d="M0,0 L0,16 L4.2,12 L7,18 L9.2,17 L6.5,11 L12,11 Z"/></g>
+  </g>
+
+  <g transform="translate(548,300)">
+    <rect width="404" height="80" rx="12" fill="#E8F8ED"/>
+    <text x="22" y="34" font-family="-apple-system,Arial,sans-serif" font-size="15" font-weight="700" fill="#1B7E37">A new window opens on Desktop 2.</text>
+    <text x="22" y="58" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#3aa05a">You never leave the desktop you're working on.</text>
+  </g>
+</svg>

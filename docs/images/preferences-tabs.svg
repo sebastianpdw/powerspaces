@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="1000" height="430" role="img" aria-label="Preferences window with seven tabs — Dock, Icons, Effects, Windows, Behavior, Strategies, System — and a Basic/Advanced switch">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#1a2440" flood-opacity="0.20"/></filter>
+  </defs>
+  <rect width="1000" height="430" fill="#F5F7FB"/>
+
+  <!-- window -->
+  <g filter="url(#sh)"><rect x="60" y="34" width="880" height="362" rx="16" fill="#FFFFFF"/></g>
+  <path d="M60 50 a16 16 0 0 1 16 -16 h848 a16 16 0 0 1 16 16 v30 h-880 z" fill="#F2F3F5"/>
+  <circle cx="88" cy="64" r="6.5" fill="#FF5F57"/><circle cx="110" cy="64" r="6.5" fill="#FEBC2E"/><circle cx="132" cy="64" r="6.5" fill="#28C840"/>
+  <text x="490" y="69" text-anchor="middle" font-family="-apple-system,Arial,sans-serif" font-size="14" font-weight="700" fill="#5b5b62">Powerspaces — Preferences</text>
+
+  <!-- Basic / Advanced switch (top-right) -->
+  <text x="852" y="68" text-anchor="end" font-family="-apple-system,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#5733CC">Advanced</text>
+  <rect x="860" y="55" width="34" height="18" rx="9" fill="#5733CC"/>
+  <circle cx="885" cy="64" r="7" fill="#fff"/>
+
+  <!-- tab strip: 6 tabs, Dock selected -->
+  <rect x="88" y="96" width="124" height="86" rx="12" fill="#EFE9FE"/>
+  <g font-family="-apple-system,Arial,sans-serif" font-size="14.5" font-weight="600" text-anchor="middle">
+
+    <!-- Dock (selected) -->
+    <g transform="translate(150,116)">
+      <rect x="-22" y="8" width="44" height="18" rx="7" fill="none" stroke="#5733CC" stroke-width="2.4"/>
+      <rect x="-15" y="13" width="8" height="8" rx="2" fill="#5733CC"/><rect x="-4" y="13" width="8" height="8" rx="2" fill="#5733CC"/><rect x="7" y="13" width="8" height="8" rx="2" fill="#5733CC"/>
+      <text x="0" y="56" fill="#5733CC">Dock</text>
+    </g>
+
+    <!-- Icons -->
+    <g transform="translate(267,116)">
+      <rect x="-15" y="7" width="13" height="13" rx="3" fill="#8a8f99"/><rect x="2" y="7" width="13" height="13" rx="3" fill="#8a8f99"/>
+      <rect x="-15" y="24" width="13" height="13" rx="3" fill="#8a8f99"/><rect x="2" y="24" width="13" height="13" rx="3" fill="#8a8f99"/>
+      <text x="0" y="56" fill="#6E6E73">Icons</text>
+    </g>
+
+    <!-- Effects (sparkle) -->
+    <g transform="translate(384,116)">
+      <path d="M0,4 L3.4,14 L13,17.5 L3.4,21 L0,31 L-3.4,21 L-13,17.5 L-3.4,14 Z" fill="#8a8f99"/>
+      <circle cx="13" cy="6" r="2.2" fill="#8a8f99"/><circle cx="-12" cy="30" r="1.8" fill="#8a8f99"/>
+      <text x="0" y="56" fill="#6E6E73">Effects</text>
+    </g>
+
+    <!-- Windows (overlapping frames) -->
+    <g transform="translate(501,116)">
+      <rect x="-16" y="6" width="26" height="20" rx="4" fill="#F2F3F5" stroke="#8a8f99" stroke-width="2.2"/>
+      <rect x="-4" y="15" width="26" height="20" rx="4" fill="#fff" stroke="#8a8f99" stroke-width="2.2"/>
+      <text x="0" y="56" fill="#6E6E73">Windows</text>
+    </g>
+
+    <!-- Behavior (gear) -->
+    <g transform="translate(618,128)" fill="#8a8f99">
+      <g stroke="#8a8f99" stroke-width="2.2" fill="none"><circle cx="0" cy="0" r="9"/></g>
+      <g fill="#8a8f99">
+        <rect x="-2.4" y="-15" width="4.8" height="6" rx="1.5"/><rect x="-2.4" y="9" width="4.8" height="6" rx="1.5"/>
+        <rect x="-15" y="-2.4" width="6" height="4.8" rx="1.5"/><rect x="9" y="-2.4" width="6" height="4.8" rx="1.5"/>
+        <rect x="-12.5" y="-12.5" width="5" height="5" rx="1.5" transform="rotate(45)"/><rect x="7.5" y="7.5" width="5" height="5" rx="1.5" transform="rotate(45)"/>
+        <rect x="7.5" y="-12.5" width="5" height="5" rx="1.5" transform="rotate(-45)"/><rect x="-12.5" y="7.5" width="5" height="5" rx="1.5" transform="rotate(-45)"/>
+      </g>
+      <circle cx="0" cy="0" r="3" fill="#fff"/>
+      <text x="0" y="44" fill="#6E6E73">Behavior</text>
+    </g>
+
+    <!-- Strategies (window + bolt) -->
+    <g transform="translate(735,116)">
+      <rect x="-16" y="2" width="26" height="26" rx="6" fill="none" stroke="#8a8f99" stroke-width="2.4"/>
+      <path d="M4 8 h12 v12 M16 8 l-14 14" stroke="#8a8f99" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="56" fill="#6E6E73">Strategies</text>
+    </g>
+
+    <!-- System (display / monitor) -->
+    <g transform="translate(852,116)">
+      <rect x="-16" y="5" width="32" height="22" rx="3.5" fill="none" stroke="#8a8f99" stroke-width="2.2"/>
+      <rect x="-3" y="27" width="6" height="5" fill="#8a8f99"/>
+      <rect x="-10" y="31" width="20" height="2.6" rx="1.3" fill="#8a8f99"/>
+      <text x="0" y="56" fill="#6E6E73">System</text>
+    </g>
+  </g>
+
+  <!-- form preview (Dock tab, Advanced on) -->
+  <line x1="80" y1="200" x2="920" y2="200" stroke="#ECECF0"/>
+  <g font-family="-apple-system,Arial,sans-serif">
+    <!-- row 1 -->
+    <text x="104" y="237" font-size="15" font-weight="600" fill="#1D1D1F">Position</text>
+    <g transform="translate(700,219)"><rect width="196" height="32" rx="8" fill="#fff" stroke="#D2D2D7"/><text x="16" y="21" font-size="14" fill="#1D1D1F">Bottom</text><text x="178" y="21" font-size="12" fill="#8a8f99">▾</text></g>
+    <!-- row 2 -->
+    <text x="104" y="285" font-size="15" font-weight="600" fill="#1D1D1F">Dock height</text>
+    <g transform="translate(700,267)"><rect width="196" height="32" rx="8" fill="#fff" stroke="#D2D2D7"/><text x="16" y="21" font-size="14" fill="#1D1D1F">Default (64)</text><text x="178" y="21" font-size="12" fill="#8a8f99">▾</text></g>
+    <!-- row 3 with custom slider (Advanced-only setting) -->
+    <text x="104" y="333" font-size="15" font-weight="600" fill="#1D1D1F">Corner radius</text>
+    <text x="222" y="333" font-size="11.5" font-weight="600" fill="#9aa0aa">Advanced</text>
+    <g transform="translate(700,315)"><rect width="196" height="32" rx="8" fill="#EFE9FE" stroke="#5733CC"/><text x="16" y="21" font-size="14" font-weight="600" fill="#5733CC">Custom…</text><text x="178" y="21" font-size="12" fill="#5733CC">▾</text></g>
+    <!-- slider revealed -->
+    <line x1="104" y1="356" x2="660" y2="356" stroke="#D8DCE6" stroke-width="4" stroke-linecap="round"/>
+    <line x1="104" y1="356" x2="420" y2="356" stroke="#5733CC" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="420" cy="356" r="9" fill="#fff" stroke="#5733CC" stroke-width="2.5"/>
+    <text x="690" y="361" font-size="13" font-weight="600" fill="#6E6E73">18 px</text>
+  </g>
+
+  <text x="500" y="416" text-anchor="middle" font-family="-apple-system,Arial,sans-serif" font-size="12.5" font-weight="500" fill="#6E6E73">Seven tabs · a Basic/Advanced switch · presets + a Custom slider on every number · saved to ~/.config/powerspaces/preferences.json</text>
+</svg>

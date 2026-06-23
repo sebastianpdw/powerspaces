@@ -1,0 +1,15 @@
+{
+  "//": "Copy to ~/.config/powerspaces/config.json. User entries override built-in defaults; unknown apps use defaultStrategy. Strategies: openArgs, newInstance, appleScript, warn, quitReopen, cmdN, focusOnly. (Single-window apps already open on another desktop can't be given a new window on the current one — macOS won't allow it — so they default to warn. To force one onto the current desktop anyway, set it to quitReopen: it quits the app and relaunches it here, but loses anything unsaved or playing.)",
+  "defaultStrategy": "newInstance",
+  "apps": [
+    { "bundleID": "org.mozilla.firefox", "strategy": "openArgs", "args": ["--new-window"] },
+    { "bundleID": "com.google.Chrome", "strategy": "openArgs", "args": ["--new-window"] },
+    { "bundleID": "com.microsoft.VSCode", "strategy": "openArgs", "args": ["--new-window"] },
+    { "bundleID": "com.apple.Safari", "strategy": "appleScript", "appleScript": "tell application \"Safari\" to make new document" },
+    { "bundleID": "com.apple.finder", "strategy": "appleScript", "appleScript": "tell application \"Finder\" to make new Finder window" },
+    { "bundleID": "com.apple.MobileSMS", "strategy": "warn" },
+    { "bundleID": "com.apple.systempreferences", "strategy": "warn" },
+    { "bundleID": "com.apple.Music", "strategy": "warn" },
+    { "bundleID": "com.apple.mail", "strategy": "warn" }
+  ]
+}

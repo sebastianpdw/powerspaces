@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 600" width="980" height="600" role="img" aria-label="The four Spaces leaks Powerspaces fixes">
+  <defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#2a2a35" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+  <rect width="980" height="600" fill="#F5F7FB"/>
+  <text x="40" y="44" font-family="-apple-system,'SF Pro Display',Arial,sans-serif" font-size="26" font-weight="800" fill="#1D1D1F">The four leaks Powerspaces fixes</text>
+  <text x="40" y="72" font-family="-apple-system,Arial,sans-serif" font-size="15" font-weight="500" fill="#6E6E73">Native Spaces almost get virtual desktops right. Powerspaces plugs the gaps.</text>
+
+  <!-- column headers -->
+  <text x="240" y="108" text-anchor="middle" font-family="-apple-system,Arial,sans-serif" font-size="13" font-weight="700" fill="#FF3B30" letter-spacing="1">THE PROBLEM</text>
+  <text x="740" y="108" text-anchor="middle" font-family="-apple-system,Arial,sans-serif" font-size="13" font-weight="700" fill="#248A3D" letter-spacing="1">POWERSPACES</text>
+
+  <!-- ROW TEMPLATE repeated 4x -->
+  <!-- Row 1 -->
+  <g transform="translate(0,124)">
+    <g filter="url(#sh)"><rect x="40" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#FBD9D6"/></g>
+    <circle cx="78" cy="48" r="18" fill="#FFE9E7"/>
+    <path d="M71 41 l14 14 M85 41 l-14 14" stroke="#FF3B30" stroke-width="3" stroke-linecap="round"/>
+    <text x="112" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Dock yank</text>
+    <text x="112" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">Clicking a Dock icon teleports you to its desktop.</text>
+    <path d="M458 48 h64 m-14 -10 l14 10 -14 10" stroke="#B9C6E6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g filter="url(#sh)"><rect x="540" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#CBEBD5"/></g>
+    <circle cx="578" cy="48" r="18" fill="#E2F7E9"/>
+    <path d="M571 48 l5 5 9 -11" stroke="#34C759" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="612" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Smart-launch</text>
+    <text x="612" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">Focuses or opens the app right here — never jumps.</text>
+  </g>
+
+  <!-- Row 2 -->
+  <g transform="translate(0,236)">
+    <g filter="url(#sh)"><rect x="40" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#FBD9D6"/></g>
+    <circle cx="78" cy="48" r="18" fill="#FFE9E7"/>
+    <path d="M71 41 l14 14 M85 41 l-14 14" stroke="#FF3B30" stroke-width="3" stroke-linecap="round"/>
+    <text x="112" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Launcher yank</text>
+    <text x="112" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">Spotlight jumps you to its other-desktop copy.</text>
+    <path d="M458 48 h64 m-14 -10 l14 10 -14 10" stroke="#B9C6E6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g filter="url(#sh)"><rect x="540" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#CBEBD5"/></g>
+    <circle cx="578" cy="48" r="18" fill="#E2F7E9"/>
+    <path d="M571 48 l5 5 9 -11" stroke="#34C759" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="612" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">App Launcher / Raycast</text>
+    <text x="612" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">A built-in grid (or Raycast) opens apps here.</text>
+  </g>
+
+  <!-- Row 3 -->
+  <g transform="translate(0,348)">
+    <g filter="url(#sh)"><rect x="40" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#FBD9D6"/></g>
+    <circle cx="78" cy="48" r="18" fill="#FFE9E7"/>
+    <path d="M71 41 l14 14 M85 41 l-14 14" stroke="#FF3B30" stroke-width="3" stroke-linecap="round"/>
+    <text x="112" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Global Dock</text>
+    <text x="112" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">The Dock shows every app, not this desktop's.</text>
+    <path d="M458 48 h64 m-14 -10 l14 10 -14 10" stroke="#B9C6E6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g filter="url(#sh)"><rect x="540" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#CBEBD5"/></g>
+    <circle cx="578" cy="48" r="18" fill="#E2F7E9"/>
+    <path d="M571 48 l5 5 9 -11" stroke="#34C759" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="612" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Per-Space dock</text>
+    <text x="612" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">A floating bar of only the apps on this desktop.</text>
+  </g>
+
+  <!-- Row 4 -->
+  <g transform="translate(0,460)">
+    <g filter="url(#sh)"><rect x="40" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#FBD9D6"/></g>
+    <circle cx="78" cy="48" r="18" fill="#FFE9E7"/>
+    <path d="M71 41 l14 14 M85 41 l-14 14" stroke="#FF3B30" stroke-width="3" stroke-linecap="round"/>
+    <text x="112" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">Global Cmd-Tab</text>
+    <text x="112" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">Cmd-Tab cycles every Space's windows at once.</text>
+    <path d="M458 48 h64 m-14 -10 l14 10 -14 10" stroke="#B9C6E6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <g filter="url(#sh)"><rect x="540" y="0" width="400" height="96" rx="14" fill="#FFF" stroke="#CBEBD5"/></g>
+    <circle cx="578" cy="48" r="18" fill="#E2F7E9"/>
+    <path d="M571 48 l5 5 9 -11" stroke="#34C759" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="612" y="42" font-family="-apple-system,Arial,sans-serif" font-size="17" font-weight="700" fill="#1D1D1F">One-click AltTab install</text>
+    <text x="612" y="66" font-family="-apple-system,Arial,sans-serif" font-size="13.5" fill="#6E6E73">A per-desktop switcher; ⌘-Tab is a quick manual step.</text>
+  </g>
+</svg>

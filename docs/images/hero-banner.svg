@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" width="1200" height="380" role="img" aria-label="Powerspaces — make macOS Spaces feel like real virtual desktops">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F1ECFE"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8C66FA"/>
+      <stop offset="1" stop-color="#5733CC"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#3A1C8A" flood-opacity="0.20"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="380" fill="url(#bg)"/>
+
+  <!-- Logo: violet squircle + white power-window glyph -->
+  <g transform="translate(64,110)" filter="url(#soft)">
+    <rect x="0" y="0" width="152" height="152" rx="36" fill="url(#violet)"/>
+    <rect x="32" y="32" width="88" height="88" rx="12" fill="none" stroke="#fff" stroke-width="5.5"/>
+    <line x1="32" y1="51" x2="120" y2="51" stroke="#fff" stroke-width="4.5"/>
+    <path d="M82.3 61.9 L65.4 82.0 L76.7 82.0 L69.7 100.7 L87.3 77.8 L76.0 77.8 Z" fill="#fff"/>
+  </g>
+
+  <!-- Wordmark + tagline (left column, kept clear of the right illustration) -->
+  <text x="248" y="152" font-family="-apple-system,'SF Pro Display','Helvetica Neue',Arial,sans-serif" font-size="58" font-weight="800" fill="#1D1D1F">Powerspaces</text>
+  <text x="250" y="196" font-family="-apple-system,'SF Pro Text','Helvetica Neue',Arial,sans-serif" font-size="21" font-weight="500" fill="#5b5b62">Make macOS Spaces feel like real virtual desktops.</text>
+
+  <!-- Feature pills (widths sized to their text) -->
+  <g font-family="-apple-system,'SF Pro Text','Helvetica Neue',Arial,sans-serif" font-size="15" font-weight="600">
+    <g transform="translate(250,224)">
+      <rect width="160" height="34" rx="17" fill="#EFE9FE" stroke="#D9CCF9"/>
+      <circle cx="20" cy="17" r="4" fill="#5733CC"/>
+      <text x="34" y="22" fill="#5733CC">No SIP changes</text>
+    </g>
+    <g transform="translate(424,224)">
+      <rect width="200" height="34" rx="17" fill="#EFE9FE" stroke="#D9CCF9"/>
+      <circle cx="20" cy="17" r="4" fill="#5733CC"/>
+      <text x="34" y="22" fill="#5733CC">Native menu-bar app</text>
+    </g>
+    <g transform="translate(638,224)">
+      <rect width="178" height="34" rx="17" fill="#EFE9FE" stroke="#D9CCF9"/>
+      <circle cx="20" cy="17" r="4" fill="#5733CC"/>
+      <text x="34" y="22" fill="#5733CC">Per-desktop dock</text>
+    </g>
+  </g>
+
+  <!-- Right: a display showing three isolated desktops, #2 is current -->
+  <g filter="url(#soft)">
+    <rect x="884" y="104" width="252" height="172" rx="18" fill="#1D1D1F"/>
+    <rect x="892" y="112" width="236" height="156" rx="9" fill="#F1EDFB"/>
+  </g>
+  <g font-family="-apple-system,'SF Pro Text',Arial,sans-serif" font-size="12" font-weight="700">
+    <!-- tile 1 -->
+    <rect x="904" y="124" width="62" height="120" rx="7" fill="#FFFFFF" stroke="#E6DEF7"/>
+    <circle cx="920" cy="142" r="6" fill="#FF9F0A"/><circle cx="942" cy="142" r="6" fill="#34C759"/>
+    <circle cx="920" cy="162" r="6" fill="#5C8FFC"/>
+    <text x="935" y="238" fill="#a99fc0" text-anchor="middle">1</text>
+    <!-- tile 2 (current) -->
+    <rect x="978" y="124" width="62" height="120" rx="7" fill="#FFFFFF" stroke="#5733CC" stroke-width="3"/>
+    <circle cx="994" cy="142" r="6" fill="#FF3B30"/><circle cx="1016" cy="142" r="6" fill="#5C8FFC"/>
+    <circle cx="994" cy="162" r="6" fill="#AF52DE"/><circle cx="1016" cy="162" r="6" fill="#34C759"/>
+    <text x="1009" y="238" fill="#5733CC" text-anchor="middle">2 · now</text>
+    <!-- tile 3 -->
+    <rect x="1052" y="124" width="62" height="120" rx="7" fill="#FFFFFF" stroke="#E6DEF7"/>
+    <circle cx="1068" cy="142" r="6" fill="#5AC8FA"/><circle cx="1090" cy="142" r="6" fill="#FF9F0A"/>
+    <text x="1083" y="238" fill="#a99fc0" text-anchor="middle">3</text>
+  </g>
+</svg>

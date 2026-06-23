@@ -1,0 +1,64 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Debug powerspaces",
+            "target": "powerspaces",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug powerspaces"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Release powerspaces",
+            "target": "powerspaces",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release powerspaces"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Debug PowerspacesApp",
+            "target": "PowerspacesApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PowerspacesApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Release PowerspacesApp",
+            "target": "PowerspacesApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PowerspacesApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Debug spacekit-tests",
+            "target": "spacekit-tests",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug spacekit-tests"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:powerspaces}",
+            "name": "Release spacekit-tests",
+            "target": "spacekit-tests",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release spacekit-tests"
+        }
+    ]
+}
