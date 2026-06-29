@@ -44,6 +44,12 @@ itself (a deliberate, documented design choice).
 
 ## Distribution integrity
 
-Released builds are currently **unsigned and un-notarized**; you build from source
-(via Homebrew or `swift build`). If you obtain a prebuilt binary from anywhere
-other than this repository, verify it yourself.
+The Homebrew cask's prebuilt `Powerspaces.app` is **Apple Developer-ID signed and
+notarized**, and the cask pins the release's `sha256`, so a tampered download fails
+to install. If you obtain a prebuilt binary from anywhere other than the official
+GitHub Releases / Homebrew tap, verify it yourself before trusting it:
+
+```sh
+spctl -a -vvv /Applications/Powerspaces.app        # expect: accepted, source=Notarized Developer ID
+codesign -dv --verbose=4 /Applications/Powerspaces.app
+```

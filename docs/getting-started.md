@@ -17,16 +17,12 @@ into your Applications folder.
 brew tap sebastianpdw/tap              # one-time
 brew trust sebastianpdw/tap            # Homebrew 6.0+: trust a third-party tap
 brew install --cask powerspaces        # copies Powerspaces.app into /Applications
-xattr -dr com.apple.quarantine /Applications/Powerspaces.app   # clear Gatekeeper (the app is unsigned), one-time
 ```
 
-The app isn't notarized, so macOS blocks the first launch. Allow it **either way**:
-
-- **Terminal:** the `xattr` line above clears it in one step (copy it right after the install), then open Powerspaces.
-- **System Settings:** try to open Powerspaces, then go to **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to Powerspaces.
-
-Then grant **Accessibility** when prompted. Head to the [User guide](user-guide.md)
-for how to use the dock.
+Powerspaces is Apple **Developer-ID signed and notarized**, so it launches with no
+Gatekeeper warning — no `xattr`, no right-click → Open. Just open it and grant
+**Accessibility** when prompted. Head to the [User guide](user-guide.md) for how to
+use the dock.
 
 The prebuilt app is **Apple Silicon only** for now; on an Intel Mac, build from a
 clone (below). Update later with `brew upgrade --cask powerspaces`.

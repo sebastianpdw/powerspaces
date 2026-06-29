@@ -51,15 +51,11 @@ Install with Homebrew:
 brew tap sebastianpdw/tap
 brew trust sebastianpdw/tap            # Homebrew 6.0+: trust a third-party tap
 brew install --cask powerspaces        # copies Powerspaces.app into /Applications
-xattr -dr com.apple.quarantine /Applications/Powerspaces.app   # clear Gatekeeper (the app is unsigned), one-time
 ```
 
-The app isn't notarized, so macOS blocks the first launch. Allow it **either way**:
-
-- **Terminal:** the `xattr` line above clears it in one step (copy it right after the install), then open Powerspaces.
-- **System Settings:** try to open Powerspaces, then go to **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to Powerspaces.
-
-Then grant **Accessibility** when prompted. The prebuilt build is **Apple Silicon only**.
+Powerspaces is Apple **Developer-ID signed and notarized**, so it launches with no
+Gatekeeper warning — just open it and grant **Accessibility** when prompted. (No
+`xattr`, no right-click → Open.) The prebuilt build is **Apple Silicon only**.
 
 Prefer to build from a clone, or want the `powerspaces` CLI too? See
 **[Getting started](docs/getting-started.md)**.
@@ -181,8 +177,9 @@ Now the Dock shows the powerspaces "power window" icon and the name **Powerspace
 icon drawing (`Sources/PowerspacesApp/AppIcon.swift`, via a headless
 `PowerspacesApp --export-iconset`), and wraps it with an `Info.plist` whose
 `LSUIElement` flag keeps it a menu-bar-only agent, matching the runtime
-`setActivationPolicy(.accessory)`. To hand the app to other people you'll need
-Apple Developer-ID signing & notarization.
+`setActivationPolicy(.accessory)`. The prebuilt Homebrew release is Apple
+Developer-ID signed & notarized; a local `make-app.sh` build is ad-hoc signed,
+which is fine for personal use.
 
 ## Configuration
 
@@ -212,8 +209,9 @@ Entries override the built-in defaults; unknown apps use `defaultStrategy`
 - **Screen Recording:** not needed (the dock uses app identity, not titles/thumbnails).
 - **Automation:** only for apps using the `appleScript` strategy.
 - Uses private APIs + (later) an event tap, so it **can't be sandboxed / App
-  Store'd**. For personal use a local build is fine; to share it, Developer-ID
-  sign + notarize.
+  Store'd** (notarization is fine — it's a malware scan, not App Review). The
+  Homebrew release is Developer-ID signed + notarized; a local build is ad-hoc
+  signed (fine for personal use).
 
 ## Notes / findings (macOS 26)
 
@@ -229,7 +227,7 @@ Entries override the built-in defaults; unknown apps use `defaultStrategy`
 
 - Phase 1 ✅ smart-launch engine + CLI + Raycast hook
 - Phase 2 ✅ per-desktop dock
-- Phase 3 ✅ preferences UI + login-item toggle + `.app` bundle (`scripts/make-app.sh`); remaining: Developer-ID signing + notarization
+- Phase 3 ✅ preferences UI + login-item toggle + `.app` bundle (`scripts/make-app.sh`) + Developer-ID signing & notarization (Homebrew cask)
 - Phase 4 ✅ per-desktop Cmd-Tab via the AltTab integration: detect/install AltTab + one-click set its active-Space filter from Preferences (the ⌘-Tab trigger is a guided manual step in AltTab)
 
 ## License

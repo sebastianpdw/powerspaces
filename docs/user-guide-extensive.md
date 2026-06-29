@@ -753,8 +753,9 @@ required**: Screen Recording is never used, and SIP is never touched.
 | **Screen Recording** | **No** | The dock uses app identity, not window titles or thumbnails. |
 
 > Because Powerspaces uses private (read-only) macOS APIs, it can't be sandboxed
-> or shipped on the App Store. For personal use, a local build is perfect. To
-> share it with others, it can be Developer-ID signed and notarized.
+> or shipped on the App Store — but that doesn't block notarization (a malware
+> scan, not App Review). The Homebrew release is **Developer-ID signed and
+> notarized**, so it installs with no Gatekeeper warning.
 
 ---
 
