@@ -89,6 +89,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Strip the debug map before signing so the distributed binaries don't embed the
+# build machine's absolute object-file paths. The linker records each .o path (e.g.
+# /Users/<name>/…/.build/…/AppDelegate.swift.o) in the debug map, which leaks the
+# builder's macOS username and local directory layout to anyone who downloads the
+# app. `strip -S` removes those debug symbols (verified: clears every embedded path);
+# it must run BEFORE code-signing, since stripping a signed binary voids its signature.
+echo "› Stripping debug symbols (removes embedded build paths)…"
+strip -S "$APP/Contents/MacOS/$APP_NAME"
+strip -S "$APP/Contents/Resources/powerspaces"
+
 # Ad-hoc code-sign the finished bundle, inside-out: the nested CLI first, then the
 # app itself (which seals Contents/Resources). swift's linker only ad-hoc-signs the
 # inner executable; the resources copied in above leave that signature inconsistent,
