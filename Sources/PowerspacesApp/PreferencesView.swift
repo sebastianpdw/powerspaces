@@ -25,6 +25,23 @@ func statusLine(_ title: String, ok: Bool, pending: Bool = false, text: String) 
     }
 }
 
+/// Pre-flight confirmation for the System-tab "install something" buttons. Spells
+/// out exactly what the click does — and shows the literal command verbatim when one
+/// actually runs — so nothing installs, opens a Terminal, or asks for a password
+/// without an explicit OK. Returns true only if the user agreed; "Agree" is the
+/// default (Return) and "Cancel" is the Escape button. One definition, used by every
+/// install action so the wording and button layout stay consistent.
+@MainActor
+func confirmInstall(title: String, detail: String, command: String? = nil) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = title
+    alert.informativeText = command.map { "\(detail)\n\nThe command it runs:\n    \($0)" } ?? detail
+    alert.addButton(withTitle: "Agree")   // first button = default, triggered by Return
+    alert.addButton(withTitle: "Cancel")  // Escape / rightmost — the safe default
+    return alert.runModal() == .alertFirstButtonReturn
+}
+
 /// The full preferences window content: an "Advanced" switch at the top-right
 /// (off = Basic), over seven grouped tabs (Dock, Icons, Effects, Windows, Behavior,
 /// Strategies, System). Each tab is bound to `Preferences` (UI prefs) or
@@ -1002,6 +1019,12 @@ private struct AltTabSetupRow: View {
     /// Kick off `brew install --cask alt-tab` in Terminal; explain + fall back to the
     /// website if it couldn't even start.
     private func installWithHomebrew() {
+        guard confirmInstall(
+            title: "Install AltTab with Homebrew?",
+            detail: "This opens a Terminal window and installs AltTab — a free, "
+                + "open-source app — using Homebrew. Homebrew may ask for your password.",
+            command: AltTabSetup.homebrewInstallCommand
+        ) else { return }
         do {
             try AltTabSetup.installViaHomebrew()
         } catch {
@@ -1081,7 +1104,7 @@ private struct RaycastSetupRow: View {
                    text: npmChecked ? (npm.map { "Found (v\($0))" } ?? "Not detected") : "Checking…")
             .help("Node.js provides npm, which builds and imports the Raycast extension.")
         HStack {
-            Button("Get Node.js") { RaycastSetup.openNodeDownload() }
+            Button("Get Node.js") { getNodeJS() }
                 .help("Open nodejs.org to download Node.js (it includes npm).")
             Button("Install CLI") { installCLI() }
                 .help("Install the powerspaces CLI to ~/.local/bin. No admin, no Terminal.")
@@ -1089,11 +1112,11 @@ private struct RaycastSetupRow: View {
             Button("Set Up Raycast Extension…") { setUp() }
                 .help("Install the CLI and import the Raycast extension (opens Terminal once).")
         }
-        Button("Install system-wide…") { installSystemWide() }
+        Button("Install CLI system-wide…") { installSystemWide() }
             .buttonStyle(.link)
             .font(.caption)
-            .help("Optional: also install to /usr/local/bin so `powerspaces` works in every "
-                  + "shell without editing PATH. This one asks for an admin password.")
+            .help("Optional: also install the CLI to /usr/local/bin so `powerspaces` works in "
+                  + "every shell without editing PATH. This one asks for an admin password.")
             .task {
                 installedLocation = RaycastSetup.installedLocation
                 if !npmChecked {
@@ -1112,8 +1135,24 @@ private struct RaycastSetupRow: View {
     }
 
 
+    /// Open nodejs.org so the user can download Node.js — after a heads-up that the
+    /// button leaves the app for the browser (Powerspaces installs nothing itself).
+    private func getNodeJS() {
+        guard confirmInstall(
+            title: "Get Node.js?",
+            detail: "This opens nodejs.org in your browser, where you can download and "
+                + "install Node.js (it includes npm). Powerspaces doesn't install it for you."
+        ) else { return }
+        RaycastSetup.openNodeDownload()
+    }
+
     /// Install just the CLI to the per-user location — no admin, no Terminal.
     private func installCLI() {
+        guard confirmInstall(
+            title: "Install the powerspaces CLI?",
+            detail: "This copies the powerspaces command-line tool into ~/.local/bin in "
+                + "your home folder. No admin password and no Terminal — it's a plain file copy."
+        ) else { return }
         do {
             let dest = try RaycastSetup.installCLIToUserLocal()
             installedLocation = RaycastSetup.installedLocation
@@ -1133,6 +1172,13 @@ private struct RaycastSetupRow: View {
 
     /// Optional system-wide install (every shell's PATH) — opens Terminal for sudo.
     private func installSystemWide() {
+        guard confirmInstall(
+            title: "Install the CLI system-wide?",
+            detail: "This opens a Terminal window and uses sudo to copy the powerspaces "
+                + "tool into /usr/local/bin, so it works in every shell. macOS will ask "
+                + "for your admin password.",
+            command: "sudo cp powerspaces /usr/local/bin/powerspaces"
+        ) else { return }
         do { try RaycastSetup.installCLISystemWide() }
         catch { presentError("Couldn't start the install", error) }
     }
