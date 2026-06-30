@@ -115,11 +115,15 @@ final class DockPanel: NSPanel {
     let boundDisplayID: CGDirectDisplayID
 
     /// The live `NSScreen` for `boundDisplayID`, re-resolved each use so it survives
-    /// display reconfiguration (NSScreen objects are recreated then). Falls back to
-    /// the main screen if the display is momentarily missing — the app delegate
-    /// tears the panel down when a display is truly gone.
+    /// display reconfiguration (NSScreen objects are recreated then). Returns nil — so
+    /// callers SKIP positioning — when the bound display is momentarily missing (e.g.
+    /// `NSScreen.screens` is still being rebuilt while waking from sleep or attaching
+    /// a monitor). It must NOT fall back to `NSScreen.main`: that would place this
+    /// display's dock on the main screen ("two docks on one screen"), and nothing
+    /// pulls it back until relaunch. When the display returns, the follow-up
+    /// screen-change event repositions the dock onto it.
     var boundScreen: NSScreen? {
-        NSScreen.screens.first { $0.displayID == boundDisplayID } ?? NSScreen.main
+        NSScreen.screens.first { $0.displayID == boundDisplayID }
     }
 
     init(screen: NSScreen) {
@@ -1090,7 +1094,9 @@ final class DockPanel: NSPanel {
         return NSWorkspace.shared.icon(forFile: "/Applications")
     }
 
-    private func reposition() {
+    /// Place the panel at its on-edge spot on `boundScreen`. Internal so the app
+    /// delegate can re-place surviving docks after a display reconfiguration.
+    func reposition() {
         guard let screen = boundScreen else { return }
         // `placedOrigin` keeps a tucked-away (auto-hidden) bar off-screen, so a
         // content rebuild from the poll doesn't yank it back into view.

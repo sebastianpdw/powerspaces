@@ -710,6 +710,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func screensChanged() {
         pollIdleTicks = 0
         refresh()
+        // refresh() adds/removes docks but leaves survivors where they are, and a
+        // pure geometry change doesn't alter their contents (so no rebuild → no
+        // reposition). Re-place every surviving dock on its (possibly moved) screen
+        // here, matching the doc-comment on the screen-change observer. A dock whose
+        // display is still coming back has a nil boundScreen and skips safely; the
+        // follow-up screen-change event places it once that display returns.
+        for dock in docks.values { dock.reposition() }
     }
 
     @objc private func refreshAction() {

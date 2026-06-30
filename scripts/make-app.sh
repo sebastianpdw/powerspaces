@@ -16,6 +16,11 @@ EXEC_NAME="PowerspacesApp"   # SwiftPM build product in .build/release/
 APP_NAME="Powerspaces"       # bundle + inner executable name → Powerspaces.app
 APP="$ROOT/$APP_NAME.app"
 
+# Single source of truth for the marketing version: the VERSION file at the repo
+# root, overridable with the VERSION env var (the release script / CI export it).
+# Replaces a hardcoded string that drifted from the released git tag + Homebrew cask.
+VERSION="${VERSION:-$(cat "$ROOT/VERSION" 2>/dev/null || echo 0.0.0)}"
+
 # shellcheck source=scripts/lib-build.sh
 . "$ROOT/scripts/lib-build.sh"
 
@@ -73,7 +78,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>         <string>nl.sebastianpdw.powerspaces</string>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
     <key>CFBundlePackageType</key>        <string>APPL</string>
-    <key>CFBundleShortVersionString</key> <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key> <string>$VERSION</string>
     <key>CFBundleVersion</key>            <string>1</string>
     <key>LSMinimumSystemVersion</key>     <string>14.0</string>
     <key>LSUIElement</key>                <true/>
