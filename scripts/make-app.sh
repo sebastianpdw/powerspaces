@@ -53,6 +53,15 @@ rsync -a --delete \
     --exclude node_modules --exclude dist --exclude .git --exclude '.DS_Store' \
     "$ROOT/raycast-extension/" "$APP/Contents/Resources/raycast-extension/"
 
+# Bundle the license + third-party notices so they travel with the distributed
+# binary, not just the source repo. A user who only gets the .app (via the
+# Homebrew cask / GitHub Release) must still receive the GPL-3.0 text (§5(a)/§6)
+# and the MIT copyright/permission notice for the adapted InstantSpaceSwitcher
+# code compiled in from Sources/CSpaceSwitch (MIT: "included in all copies").
+echo "› Bundling license + third-party notices…"
+cp "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+cp "$ROOT/THIRD-PARTY-NOTICES.md" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.md"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
