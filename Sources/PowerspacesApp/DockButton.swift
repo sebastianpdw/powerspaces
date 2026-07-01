@@ -182,14 +182,37 @@ final class DockButton: NSButton {
             ctx.duration = reduce ? 0 : prefs.hoverAnimation
             ctx.allowsImplicitAnimation = true
             layer?.backgroundColor = on ? NSColor.white.withAlphaComponent(alpha).cgColor : NSColor.clear.cgColor
-            layer?.transform = on ? centeredScale(scale) : CATransform3DIdentity
+            layer?.transform = on ? edgeAnchoredScale(scale) : CATransform3DIdentity
         }
+    }
+
+    /// A scale anchored at the bar's OUTER edge, so the icon magnifies INWARD (toward
+    /// the screen interior) instead of growing symmetrically. This keeps a hovered
+    /// icon from spilling outward past the screen edge onto a vertically-stacked
+    /// neighbouring display, and mirrors how the macOS Dock magnifies. NSView owns
+    /// its backing layer's `anchorPoint` (the bottom-left corner), so we translate to
+    /// the anchor, scale, then translate back.
+    private func edgeAnchoredScale(_ factor: CGFloat) -> CATransform3D {
+        // The anchor is the midpoint of the icon's outer edge — the side that hugs
+        // the screen. (bounds is unflipped: minY is the bottom, maxY the top.)
+        let ax: CGFloat, ay: CGFloat
+        switch Preferences.shared.barPosition {
+        case .bottom: ax = bounds.midX; ay = bounds.minY   // grow up
+        case .top:    ax = bounds.midX; ay = bounds.maxY   // grow down
+        case .left:   ax = bounds.minX; ay = bounds.midY   // grow right
+        case .right:  ax = bounds.maxX; ay = bounds.midY   // grow left
+        }
+        var t = CATransform3DMakeTranslation(ax, ay, 0)
+        t = CATransform3DScale(t, factor, factor, 1)
+        return CATransform3DTranslate(t, -ax, -ay, 0)
     }
 
     /// A scale anchored at the icon's center. NSView owns its backing layer's
     /// `anchorPoint` (effectively the bottom-left corner), so a plain
     /// `CATransform3DMakeScale` magnifies toward the top-right. Translating to
-    /// the center, scaling, then translating back keeps it growing in place.
+    /// the center, scaling, then translating back keeps it growing in place. Used
+    /// by the press feedback and the shrink/poof remove animations, which grow or
+    /// shrink symmetrically (unlike the hover magnify, which grows inward).
     private func centeredScale(_ factor: CGFloat) -> CATransform3D {
         let cx = bounds.midX, cy = bounds.midY
         var t = CATransform3DMakeTranslation(cx, cy, 0)

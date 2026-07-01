@@ -78,6 +78,12 @@ final class DockPanel: NSPanel {
     /// both sides.
     private var effectAlong: NSLayoutConstraint?
     private var effectThickness: NSLayoutConstraint?
+    /// Pins the bar to the window's outer edge (the screen edge it hugs); set per
+    /// orientation in `applyBarFrame` so hover headroom stays on the inner side.
+    private var effectCross: NSLayoutConstraint?
+    /// Centers the bar along its own length (x for a horizontal bar, y for a
+    /// vertical one). Orientation-dependent, so it lives with the other bar frames.
+    private var effectAlongCenter: NSLayoutConstraint?
 
     /// True while an icon is mid-drag. Suppresses the background poll's rebuilds
     /// so the buttons aren't torn out from under the drag. (Internal, not private,
@@ -172,13 +178,14 @@ final class DockPanel: NSPanel {
             tintOverlay.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
         ])
         container.addSubview(stack)
-        // The blur (visible bar) is centered in the window; its size is set in
-        // `applyBarFrame`. The icon stack fills the window so the icons sit at the
-        // window's center — which lines up with the centered bar — and a hovered
-        // icon can magnify into the spare room `panelSize` leaves around the bar.
+        // The blur (visible bar) hugs the window's OUTER edge — the screen edge the
+        // bar sits against — with all hover headroom on the inner side; its cross
+        // position and size are set per orientation in `applyBarFrame`. The icon
+        // stack fills the window and aligns its icons to that same outer edge (see
+        // `applyOrientation`), so a hovered icon magnifies INWARD into the spare room
+        // `panelSize` leaves on the inner side — never outward past the screen edge
+        // onto a vertically-stacked neighbouring display.
         NSLayoutConstraint.activate([
-            effect.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            effect.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
@@ -264,9 +271,15 @@ final class DockPanel: NSPanel {
         stack.edgeInsets = vertical
             ? NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
             : NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-        // Center icons across the bar so they stay centered when "Dock height" (or
-        // the hover headroom in `panelSize`) makes the window thicker than an icon.
-        stack.alignment = vertical ? .centerX : .centerY
+        // Align icons to the bar's OUTER edge (the screen edge it hugs), so they sit
+        // on the visible bar while the hover headroom `panelSize` adds extends inward
+        // — the magnify then grows them inward, never past the screen edge.
+        switch Preferences.shared.barPosition {
+        case .bottom: stack.alignment = .bottom
+        case .top:    stack.alignment = .top
+        case .left:   stack.alignment = .leading
+        case .right:  stack.alignment = .trailing
+        }
         applyBarFrame()
     }
 
@@ -285,21 +298,37 @@ final class DockPanel: NSPanel {
     }
 
     /// Frames the blur to `barThickness` across and the full window length along
-    /// its axis. Centered (via the init constraints) so any spare window room for
-    /// hover spill is split evenly above/below the bar.
+    /// its axis, pinned to the window's OUTER edge so any spare window room (hover
+    /// headroom) sits on the inner side and the bar never overhangs the screen edge.
     private func applyBarFrame() {
-        let vertical = Preferences.shared.barPosition.isVertical
+        let pos = Preferences.shared.barPosition
+        let vertical = pos.isVertical
         effectAlong?.isActive = false
+        effectAlongCenter?.isActive = false
         effectThickness?.isActive = false
+        effectCross?.isActive = false
         if vertical {
             effectAlong = effect.heightAnchor.constraint(equalTo: container.heightAnchor)
+            effectAlongCenter = effect.centerYAnchor.constraint(equalTo: container.centerYAnchor)
             effectThickness = effect.widthAnchor.constraint(equalToConstant: barThickness())
         } else {
             effectAlong = effect.widthAnchor.constraint(equalTo: container.widthAnchor)
+            effectAlongCenter = effect.centerXAnchor.constraint(equalTo: container.centerXAnchor)
             effectThickness = effect.heightAnchor.constraint(equalToConstant: barThickness())
         }
+        // Pin the bar to the window's OUTER edge so all hover headroom falls on the
+        // inner side and the window (placed by `origin`) never crosses the screen's
+        // outer edge onto a vertically-stacked neighbouring display.
+        switch pos {
+        case .bottom: effectCross = effect.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        case .top:    effectCross = effect.topAnchor.constraint(equalTo: container.topAnchor)
+        case .left:   effectCross = effect.leadingAnchor.constraint(equalTo: container.leadingAnchor)
+        case .right:  effectCross = effect.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+        }
         effectAlong?.isActive = true
+        effectAlongCenter?.isActive = true
         effectThickness?.isActive = true
+        effectCross?.isActive = true
     }
 
     /// The window size for the current stack. Along the bar it fits the icons; the
@@ -409,9 +438,9 @@ final class DockPanel: NSPanel {
         stack.addArrangedSubview(hint)
     }
 
-    /// Adds the transient `animationCrossPad` to the cross axis (both sides). The
-    /// bar honors the edge gap and stays centered regardless (see `origin(forSize:)`),
-    /// so this only grows transparent margin around the bar — never moves it.
+    /// Adds the transient `animationCrossPad` to the cross axis. The window's outer
+    /// edge is pinned at the edge gap (see `origin(forSize:)`), so this extra room
+    /// grows on the INNER side — it never pushes the bar past the screen edge.
     private func padded(_ size: NSSize) -> NSSize {
         guard animationCrossPad > 0 else { return size }
         var size = size
@@ -1111,23 +1140,22 @@ final class DockPanel: NSPanel {
     func origin(forSize size: NSSize, on screen: NSScreen) -> NSPoint {
         let visible = screen.visibleFrame
         let gap = CGFloat(Preferences.shared.edgeGap)
-        // The blur is centered in the window with `margin` of transparent room on
-        // each side (the hover-spill headroom from `panelSize`). Pull the window
-        // that far past the edge so the *visible bar* — not the window — honors the
-        // gap; the spare margin spills harmlessly past the screen edge. `margin` is
-        // 0 when the bar fills the window (no headroom), so this is a no-op then.
-        let vertical = Preferences.shared.barPosition.isVertical
-        let crossSize = vertical ? size.width : size.height
-        let margin = (crossSize - barThickness()) / 2
+        // The bar hugs the window's OUTER edge (`applyBarFrame`) with all hover
+        // headroom on the inner side, so we anchor the window's outer edge at the
+        // edge gap and let the window extend inward. It therefore never crosses the
+        // screen's outer edge — which matters when another display is stacked
+        // directly beyond it (vertically-aligned screens). The old code pulled the
+        // window a `margin` past the edge, so the bar and its magnified icons spilled
+        // onto the neighbouring screen.
         switch Preferences.shared.barPosition {
         case .bottom:
-            return NSPoint(x: visible.midX - size.width / 2, y: visible.minY + gap - margin)
+            return NSPoint(x: visible.midX - size.width / 2, y: visible.minY + gap)
         case .top:
-            return NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - gap + margin)
+            return NSPoint(x: visible.midX - size.width / 2, y: visible.maxY - size.height - gap)
         case .left:
-            return NSPoint(x: visible.minX + gap - margin, y: visible.midY - size.height / 2)
+            return NSPoint(x: visible.minX + gap, y: visible.midY - size.height / 2)
         case .right:
-            return NSPoint(x: visible.maxX - size.width - gap + margin, y: visible.midY - size.height / 2)
+            return NSPoint(x: visible.maxX - size.width - gap, y: visible.midY - size.height / 2)
         }
     }
 

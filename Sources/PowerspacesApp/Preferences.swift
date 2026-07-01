@@ -253,7 +253,7 @@ final class Preferences: ObservableObject {
             K.hudPosition: HUDPosition.top.rawValue,
             K.forceNewModifier: ForceNewModifier.shiftOrOption.rawValue,
             K.middleClickAction: MiddleClickAction.newWindow.rawValue,
-            K.quitOnLastWindowClose: true,
+            K.quitOnLastWindowClose: false,   // experimental + can discard unsaved work → opt-in (off by default)
             K.menuGlyph: MenuGlyph.powerWindow.rawValue,
             K.menuBarShowsDesktopNumber: false,
             K.launchAtLogin: true,
