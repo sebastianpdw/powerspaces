@@ -717,6 +717,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // display is still coming back has a nil boundScreen and skips safely; the
         // follow-up screen-change event places it once that display returns.
         for dock in docks.values { dock.reposition() }
+        // A display attach/rearrange can let macOS drift the Apple Dock's hidden
+        // state back (auto-hide off, or the tile size reset) — which would make it
+        // reappear full-size during App Exposé / Mission Control. Re-assert our hide.
+        AppleDockController.reassertHiddenIfDrifted()
     }
 
     @objc private func refreshAction() {
@@ -741,6 +745,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isPollingPaused = false
         restartPoll()
         refresh()
+        // Sleep/wake is a known trigger for macOS drifting the Dock's hidden state
+        // back; re-assert it so a woken Mac doesn't show the Apple Dock full-size.
+        AppleDockController.reassertHiddenIfDrifted()
     }
 
     /// Rebuild every dock's contents from the live snapshot, one per display.

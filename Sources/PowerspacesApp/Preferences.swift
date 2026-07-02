@@ -179,6 +179,9 @@ final class Preferences: ObservableObject {
         // Internal backup of the user's com.apple.dock autohide value, captured the
         // first time we hide Apple's Dock so re-enabling restores exactly that.
         static let appleDockAutohideBackup = "appleDockAutohideBackup"
+        // Internal backup of the user's com.apple.dock tilesize, captured the first
+        // time we hide Apple's Dock so re-enabling restores it. "" means "was unset".
+        static let appleDockTilesizeBackup = "appleDockTilesizeBackup"
         static let appLauncherEnabled = "appLauncherEnabled"
         static let launcherHotkey = "launcherHotkey"
         static let desktopIndicatorEnabled = "desktopIndicatorEnabled"
@@ -435,6 +438,17 @@ final class Preferences: ObservableObject {
         set {
             if let newValue { store.set(newValue ? "true" : "false", K.appleDockAutohideBackup) }
             else { store.remove(K.appleDockAutohideBackup) }
+        }
+    }
+    /// Internal backup of the user's com.apple.dock `tilesize`, captured the first
+    /// time we hide Apple's Dock so re-enabling restores it exactly. An empty string
+    /// means the user had no explicit tilesize (restore = clear the key); `nil` means
+    /// no backup. Written directly, like `appleDockAutohideBackup` (not a UI setting).
+    var appleDockTilesizeBackup: String? {
+        get { store.string(K.appleDockTilesizeBackup) }
+        set {
+            if let newValue { store.set(newValue, K.appleDockTilesizeBackup) }
+            else { store.remove(K.appleDockTilesizeBackup) }
         }
     }
     /// How running apps are distinguished: dim the not-running ones, or box the
