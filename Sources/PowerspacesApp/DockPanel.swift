@@ -73,9 +73,9 @@ final class DockPanel: NSPanel {
     /// isn't clipped at the window edge. 0 for the in-row placements.
     private var indicatorReserve: CGFloat = 0
     /// The visible bar's two cross-/along-axis size constraints, swapped when the
-    /// bar's orientation changes (see `applyBarFrame`). The bar is centered in the
-    /// window so the extra room `panelSize` leaves for hover spill sits evenly on
-    /// both sides.
+    /// bar's orientation changes (see `applyBarFrame`). The bar hugs the window's
+    /// outer edge (see `effectCross`), so the extra room `panelSize` leaves for
+    /// hover spill sits on the inner side.
     private var effectAlong: NSLayoutConstraint?
     private var effectThickness: NSLayoutConstraint?
     /// Pins the bar to the window's outer edge (the screen edge it hugs); set per
@@ -84,6 +84,14 @@ final class DockPanel: NSPanel {
     /// Centers the bar along its own length (x for a horizontal bar, y for a
     /// vertical one). Orientation-dependent, so it lives with the other bar frames.
     private var effectAlongCenter: NSLayoutConstraint?
+    /// The icon stack's two along-axis edge constraints (to the window) and its
+    /// cross-axis *center* constraint (to the bar). The stack fills the window along
+    /// the bar and centers on the bar's cross axis, so icons sit centered on the
+    /// visible bar even when "Dock height" makes the bar thicker than an icon. Set
+    /// per orientation in `applyBarFrame` alongside the bar's own frame.
+    private var stackAlongStart: NSLayoutConstraint?
+    private var stackAlongEnd: NSLayoutConstraint?
+    private var stackCrossCenter: NSLayoutConstraint?
 
     /// True while an icon is mid-drag. Suppresses the background poll's rebuilds
     /// so the buttons aren't torn out from under the drag. (Internal, not private,
@@ -181,18 +189,14 @@ final class DockPanel: NSPanel {
         // The blur (visible bar) hugs the window's OUTER edge — the screen edge the
         // bar sits against — with all hover headroom on the inner side; its cross
         // position and size are set per orientation in `applyBarFrame`. The icon
-        // stack fills the window and aligns its icons to that same outer edge (see
-        // `applyOrientation`), so a hovered icon magnifies INWARD into the spare room
-        // `panelSize` leaves on the inner side — never outward past the screen edge
-        // onto a vertically-stacked neighbouring display.
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
+        // stack fills the window along the bar and is *centered on the bar's cross
+        // axis* (see `applyBarFrame`), so icons sit centered on the visible bar; a
+        // hovered icon still magnifies INWARD (see `DockButton.edgeAnchoredScale`)
+        // into the spare room `panelSize` leaves on the inner side — never outward
+        // past the screen edge onto a vertically-stacked neighbouring display. The
+        // stack's own constraints are (re)built per orientation in `applyBarFrame`.
         contentView = container
-        applyOrientation() // needs `effect` in the container (frames the bar)
+        applyOrientation() // needs `effect` in the container (frames the bar + stack)
         applyDockTint()
     }
 
@@ -271,15 +275,14 @@ final class DockPanel: NSPanel {
         stack.edgeInsets = vertical
             ? NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
             : NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-        // Align icons to the bar's OUTER edge (the screen edge it hugs), so they sit
-        // on the visible bar while the hover headroom `panelSize` adds extends inward
-        // — the magnify then grows them inward, never past the screen edge.
-        switch Preferences.shared.barPosition {
-        case .bottom: stack.alignment = .bottom
-        case .top:    stack.alignment = .top
-        case .left:   stack.alignment = .leading
-        case .right:  stack.alignment = .trailing
-        }
+        // Center icons across the bar so they stay centered when "Dock height" (or
+        // the hover headroom in `panelSize`) makes the bar/window thicker than an
+        // icon. The stack is pinned to the bar's cross *center* (not the window's) in
+        // `applyBarFrame`, so "centered" means centered on the visible bar — which
+        // hugs the screen edge — rather than on the taller window. A hovered icon
+        // still magnifies inward via `DockButton.edgeAnchoredScale`, so it never
+        // grows past the screen edge.
+        stack.alignment = vertical ? .centerX : .centerY
         applyBarFrame()
     }
 
@@ -300,6 +303,9 @@ final class DockPanel: NSPanel {
     /// Frames the blur to `barThickness` across and the full window length along
     /// its axis, pinned to the window's OUTER edge so any spare window room (hover
     /// headroom) sits on the inner side and the bar never overhangs the screen edge.
+    /// Also (re)builds the icon stack's constraints: it fills the window along the
+    /// bar and is centered on the bar's cross axis, so icons sit centered on the
+    /// visible bar even when the bar is thicker than an icon.
     private func applyBarFrame() {
         let pos = Preferences.shared.barPosition
         let vertical = pos.isVertical
@@ -307,14 +313,25 @@ final class DockPanel: NSPanel {
         effectAlongCenter?.isActive = false
         effectThickness?.isActive = false
         effectCross?.isActive = false
+        stackAlongStart?.isActive = false
+        stackAlongEnd?.isActive = false
+        stackCrossCenter?.isActive = false
         if vertical {
             effectAlong = effect.heightAnchor.constraint(equalTo: container.heightAnchor)
             effectAlongCenter = effect.centerYAnchor.constraint(equalTo: container.centerYAnchor)
             effectThickness = effect.widthAnchor.constraint(equalToConstant: barThickness())
+            // Stack fills the window top→bottom (along the bar) and centers on the
+            // bar's width, so its icons sit centered on the visible bar.
+            stackAlongStart = stack.topAnchor.constraint(equalTo: container.topAnchor)
+            stackAlongEnd = stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            stackCrossCenter = stack.centerXAnchor.constraint(equalTo: effect.centerXAnchor)
         } else {
             effectAlong = effect.widthAnchor.constraint(equalTo: container.widthAnchor)
             effectAlongCenter = effect.centerXAnchor.constraint(equalTo: container.centerXAnchor)
             effectThickness = effect.heightAnchor.constraint(equalToConstant: barThickness())
+            stackAlongStart = stack.leadingAnchor.constraint(equalTo: container.leadingAnchor)
+            stackAlongEnd = stack.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+            stackCrossCenter = stack.centerYAnchor.constraint(equalTo: effect.centerYAnchor)
         }
         // Pin the bar to the window's OUTER edge so all hover headroom falls on the
         // inner side and the window (placed by `origin`) never crosses the screen's
@@ -329,6 +346,9 @@ final class DockPanel: NSPanel {
         effectAlongCenter?.isActive = true
         effectThickness?.isActive = true
         effectCross?.isActive = true
+        stackAlongStart?.isActive = true
+        stackAlongEnd?.isActive = true
+        stackCrossCenter?.isActive = true
     }
 
     /// The window size for the current stack. Along the bar it fits the icons; the
@@ -344,9 +364,15 @@ final class DockPanel: NSPanel {
         let baseCross: CGFloat
         var size: NSSize
         if prefs.hoverEnabled {
-            // A little extra past the pure magnified size so the icon's edge isn't
-            // flush against the window (which would nip its anti-aliasing).
-            let hoverThickness = contentCross() * CGFloat(prefs.hoverScale) + DockPanel.hoverHeadroom
+            // Icons rest centered on the bar, so a resting icon's outer edge sits
+            // `(bar - content)/2` in from the window's outer edge and the magnify
+            // grows inward from there (`DockButton.edgeAnchoredScale`). Reserve that
+            // offset plus the magnified height, and a little extra past the pure
+            // magnified size so the icon's inner edge isn't flush against the window
+            // (which would nip its anti-aliasing).
+            let content = contentCross()
+            let restOffset = max(0, (bar - content) / 2)
+            let hoverThickness = restOffset + content * CGFloat(prefs.hoverScale) + DockPanel.hoverHeadroom
             baseCross = max(bar, hoverThickness)
             size = stack.fittingSize
         } else {
