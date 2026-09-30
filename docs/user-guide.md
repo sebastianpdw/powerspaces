@@ -1,10 +1,21 @@
+<!-- site-nav -->
+<p align="center">
+  <a href="README.md"><b>Powerspaces</b></a> &nbsp;·&nbsp;
+  <a href="user-guide.md">User guide</a> &nbsp;·&nbsp;
+  <a href="user-guide-extensive.md">Full guide</a> &nbsp;·&nbsp;
+  <a href="getting-started.md">Getting started</a> &nbsp;·&nbsp;
+  <a href="cli.md">CLI</a> &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/sebastianpdw">♥ Support</a> &nbsp;·&nbsp;
+  <a href="https://powerspaces.app">Website ↗</a>
+</p>
+
 # Powerspaces: User Guide
 
 <p align="center">
-  <img src="images/hero-banner.svg" alt="Powerspaces: make macOS Spaces feel like real virtual desktops" width="840">
+  <img src="images/hero-banner.svg" alt="Powerspaces: make macOS Spaces work like real virtual desktops" width="840">
 </p>
 
-**Make macOS Spaces feel like real virtual desktops.** Powerspaces is a tiny,
+**Make macOS Spaces work like real virtual desktops.** Powerspaces is a tiny,
 native menu-bar app that stops the Dock and launchers from *yanking* you to
 another desktop, and gives each desktop its own dock, so every desktop finally
 behaves like its own isolated workspace, the way Windows virtual desktops do.

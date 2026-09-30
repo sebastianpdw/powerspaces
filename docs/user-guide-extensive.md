@@ -1,10 +1,21 @@
+<!-- site-nav -->
+<p align="center">
+  <a href="README.md"><b>Powerspaces</b></a> &nbsp;·&nbsp;
+  <a href="user-guide.md">User guide</a> &nbsp;·&nbsp;
+  <a href="user-guide-extensive.md">Full guide</a> &nbsp;·&nbsp;
+  <a href="getting-started.md">Getting started</a> &nbsp;·&nbsp;
+  <a href="cli.md">CLI</a> &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/sebastianpdw">♥ Support</a> &nbsp;·&nbsp;
+  <a href="https://powerspaces.app">Website ↗</a>
+</p>
+
 # Powerspaces: Extensive User Guide
 
 <p align="center">
-  <img src="images/hero-banner.svg" alt="Powerspaces: make macOS Spaces feel like real virtual desktops" width="840">
+  <img src="images/hero-banner.svg" alt="Powerspaces: make macOS Spaces work like real virtual desktops" width="840">
 </p>
 
-**Make macOS Spaces feel like real virtual desktops.**
+**Make macOS Spaces work like real virtual desktops.**
 
 > In a hurry? The short **[User guide](user-guide.md)** covers the essentials in a
 > couple of minutes. This page is the complete reference, covering every feature,

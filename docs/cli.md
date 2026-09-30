@@ -1,3 +1,14 @@
+<!-- site-nav -->
+<p align="center">
+  <a href="README.md"><b>Powerspaces</b></a> &nbsp;·&nbsp;
+  <a href="user-guide.md">User guide</a> &nbsp;·&nbsp;
+  <a href="user-guide-extensive.md">Full guide</a> &nbsp;·&nbsp;
+  <a href="getting-started.md">Getting started</a> &nbsp;·&nbsp;
+  <a href="cli.md">CLI</a> &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/sebastianpdw">♥ Support</a> &nbsp;·&nbsp;
+  <a href="https://powerspaces.app">Website ↗</a>
+</p>
+
 # CLI reference
 
 The `powerspaces` command is the engine's front door, handy for scripting, quick

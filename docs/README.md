@@ -1,8 +1,23 @@
-# powerspaces docs
+<!-- site-nav -->
+<p align="center">
+  <a href="README.md"><b>Powerspaces</b></a> &nbsp;·&nbsp;
+  <a href="user-guide.md">User guide</a> &nbsp;·&nbsp;
+  <a href="user-guide-extensive.md">Full guide</a> &nbsp;·&nbsp;
+  <a href="getting-started.md">Getting started</a> &nbsp;·&nbsp;
+  <a href="cli.md">CLI</a> &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/sebastianpdw">♥ Support</a> &nbsp;·&nbsp;
+  <a href="https://powerspaces.app">Website ↗</a>
+</p>
 
-Documentation for **powerspaces**, a lightweight macOS menu-bar app that makes
-native Spaces behave like Microsoft Windows virtual desktops by fixing the
-launch/activation leaks in the Dock and launchers.
+# Powerspaces docs
+
+<p align="center">
+  <img src="images/hero-banner.svg" alt="Powerspaces: make macOS Spaces work like real virtual desktops" width="840">
+</p>
+
+Documentation for **Powerspaces**, a lightweight macOS menu-bar app that makes
+native Spaces work like real virtual desktops by fixing the launch/activation
+leaks in the Dock and launchers.
 
 ## Start here
 

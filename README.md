@@ -1,5 +1,16 @@
+<!-- site-nav -->
 <p align="center">
-  <img src="docs/images/hero-banner.svg" alt="Powerspaces: make macOS Spaces feel like real virtual desktops" width="840">
+  <a href="docs/README.md"><b>Powerspaces</b></a> &nbsp;·&nbsp;
+  <a href="docs/user-guide.md">User guide</a> &nbsp;·&nbsp;
+  <a href="docs/user-guide-extensive.md">Full guide</a> &nbsp;·&nbsp;
+  <a href="docs/getting-started.md">Getting started</a> &nbsp;·&nbsp;
+  <a href="docs/cli.md">CLI</a> &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/sebastianpdw">♥ Support</a> &nbsp;·&nbsp;
+  <a href="https://powerspaces.app">Website ↗</a>
+</p>
+
+<p align="center">
+  <a href="https://powerspaces.app"><img src="docs/images/hero-banner.svg" alt="Powerspaces: make macOS Spaces work like real virtual desktops" width="840"></a>
 </p>
 
 # powerspaces
@@ -16,7 +27,7 @@ extensions, no Screen Recording.
 **Requires macOS 14 or later, and supports macOS 27.** See the
 [changelog](docs/changelog.md) for what has been verified on which version.
 
-📚 **Docs:** [User guide](docs/user-guide.md) · [Getting started](docs/getting-started.md) · [Changelog](docs/changelog.md) · [docs index](docs/README.md)
+🌐 **Website:** [powerspaces.app](https://powerspaces.app) &nbsp;·&nbsp; 📚 **Docs:** [User guide](docs/user-guide.md) · [Getting started](docs/getting-started.md) · [Changelog](docs/changelog.md) · [docs index](docs/README.md)
 
 ## What it solves
 
