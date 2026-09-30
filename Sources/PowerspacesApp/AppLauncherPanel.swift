@@ -14,6 +14,7 @@ import SwiftUI
 final class AppLauncherPanel: NSPanel {
     /// Launch a chosen app — set by the app layer to route through smart-launch.
     /// The `Bool` is `forceNew`: ⌘ held opens a new window on the current space.
+    var onPresent: ((NSScreen?) -> Void)?
     var onLaunch: ((InstalledApp, Bool) -> Void)?
 
     private var clickOutsideMonitor: Any?
@@ -52,6 +53,7 @@ final class AppLauncherPanel: NSPanel {
     func toggle(on screen: NSScreen? = nil) { isVisible ? close() : present(on: screen) }
 
     private func present(on screen: NSScreen? = nil) {
+        onPresent?(screen ?? NSScreen.main)
         // Rebuild the content each open so the app list and search box are fresh,
         // and start a fresh keyboard selection (first app highlighted).
         let keyboard = LauncherKeyboard()

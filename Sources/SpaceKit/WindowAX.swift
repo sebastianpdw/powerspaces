@@ -11,8 +11,7 @@ import Foundation
 ///
 /// Why this matters: an AX read (window list, title, frame, …) is an IPC round-trip
 /// served by the *target* app's main run loop. If that app is itself wedged, an
-/// un-capped call blocks **our** main thread — the dock refresh reads window titles
-/// there — until the system default timeout (many seconds) finally fires. One stuck
+/// un-capped call blocks the sampling or launcher queue until the system default timeout (many seconds) finally fires. One stuck
 /// app then presents as Powerspaces freezing: the dock stops updating and the menu
 /// won't open. A tight cap turns that into "this one app's title is briefly missing"
 /// and the next refresh recovers.
@@ -31,25 +30,74 @@ public func capAccessibilityMessagingTimeout(_ seconds: Float = 1.0) {
 enum WindowAX {
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
+    /// Reading the app role lets lazy native Accessibility implementations
+    /// initialize their APIs before we ask for windows (not just client trust).
+    private static func application(of pid: pid_t) -> AXUIElement {
+        let app = AXUIElementCreateApplication(pid)
+        var role: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(app, kAXRoleAttribute as CFString, &role)
+        return app
+    }
+
+    /// Electron documents AXManualAccessibility for third-party window tools.
+    /// Request it only for a clicked window not yet usable through AX, and restore the
+    /// original false value when the focus operation ends. No app-name checks.
+    static func requestWindowAccess(windowID: CGWindowID, pid: pid_t) -> WindowFocusPolicy.AccessibilityRequest {
+        var current: Bool?
+        let app = AXUIElementCreateApplication(pid)
+        let attribute = "AXManualAccessibility" as CFString
+        var needsAccess = false
+        if isTrusted {
+            switch lookupWindow(windowID: windowID, pid: pid) {
+            case .failure: needsAccess = true
+            case let .success(window): needsAccess = WindowFocusPolicy.needsWindowAccess(role: role(of: window))
+            }
+        }
+        if needsAccess {
+            var ref: CFTypeRef?
+            if AXUIElementCopyAttributeValue(app, attribute, &ref) == .success,
+               let value = ref, CFGetTypeID(value) == CFBooleanGetTypeID() {
+                current = CFBooleanGetValue((value as! CFBoolean))
+            }
+        }
+        return WindowFocusPolicy.AccessibilityRequest(currentValue: current) { enabled in
+            let error = AXUIElementSetAttributeValue(app, attribute, enabled ? kCFBooleanTrue : kCFBooleanFalse)
+            Log.info("Window Accessibility request: pid=\(pid) enabled=\(enabled) axError=\(error.rawValue)")
+            return error == .success
+        }
+    }
+
+    enum LookupFailure: Error {
+        case inventory(AXError)
+        case malformedInventory
+        case identity(AXError)
+        case missing
+
+        var diagnostic: String {
+            switch self {
+            case let .inventory(error): return "inventory axError=\(error.rawValue)"
+            case .malformedInventory: return "inventory-type"
+            case let .identity(error): return "window-id axError=\(error.rawValue)"
+            case .missing: return "ax-window-missing"
+            }
+        }
+    }
+
     /// All AX window elements for an app (empty when AX can't answer). Fetching
     /// this is the costly part — one IPC round-trip to the app — so callers that
     /// need several of an app's windows should fetch once and reuse (see
     /// `WindowTitleReader`).
     static func windows(of pid: pid_t) -> [AXUIElement] {
-        let app = AXUIElementCreateApplication(pid)
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &ref) == .success,
-              let windows = ref as? [AXUIElement] else { return [] }
-        return windows
+        availableWindows(of: pid) ?? []
     }
 
-    /// The element matching `windowID` within an already-fetched window list.
-    static func firstWindow(windowID: CGWindowID, in windows: [AXUIElement]) -> AXUIElement? {
-        for window in windows {
-            var wid: CGWindowID = 0
-            if _AXUIElementGetWindow(window, &wid) == .success, wid == windowID { return window }
-        }
-        return nil
+    /// nil distinguishes an IPC failure from a confirmed empty inventory.
+    static func availableWindows(of pid: pid_t) -> [AXUIElement]? {
+        let app = application(of: pid)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &ref) == .success,
+              let windows = ref as? [AXUIElement] else { return nil }
+        return windows
     }
 
     /// The window-server id backing an AX window element, or nil when AX can't
@@ -62,7 +110,35 @@ enum WindowAX {
 
     /// The AXUIElement for a specific on-screen window (matched by CGWindowID).
     static func axWindow(windowID: CGWindowID, pid: pid_t) -> AXUIElement? {
-        firstWindow(windowID: windowID, in: windows(of: pid))
+        try? lookupWindow(windowID: windowID, pid: pid).get()
+    }
+
+    /// Preserve the failure reason for launcher diagnostics. An allowed client
+    /// can still encounter an unavailable inventory or a vanished window.
+    static func lookupWindow(windowID: CGWindowID, pid: pid_t) -> Result<AXUIElement, LookupFailure> {
+        let app = application(of: pid)
+        var ref: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &ref)
+        let windows = error == .success ? ref as? [AXUIElement] : nil
+        var identityError: AXError?
+        func attributeWindow(_ attribute: String) -> AXUIElement? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(app, attribute as CFString, &value) == .success,
+                  let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return (value as! AXUIElement)
+        }
+        let match = WindowFocusPolicy.exactWindow(id: windowID, windows: windows ?? [],
+            focused: { attributeWindow(kAXFocusedWindowAttribute) },
+            main: { attributeWindow(kAXMainWindowAttribute) }) { window in
+            var wid: CGWindowID = 0
+            let error = _AXUIElementGetWindow(window, &wid)
+            if error != .success { identityError = error }
+            return error == .success ? wid : nil
+        }
+        if let match { return .success(match) }
+        guard error == .success else { return .failure(.inventory(error)) }
+        guard windows != nil else { return .failure(.malformedInventory) }
+        return .failure(identityError.map(LookupFailure.identity) ?? .missing)
     }
 
     static func frame(of window: AXUIElement) -> CGRect? {
@@ -91,21 +167,20 @@ enum WindowAX {
         }
     }
 
-    static func minimize(_ window: AXUIElement) {
-        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
-    }
-
-    /// De-miniaturize a window (pull it back out of the Dock). Harmless if the
-    /// window isn't minimized.
-    static func unminimize(_ window: AXUIElement) {
-        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+    @discardableResult
+    static func minimize(_ window: AXUIElement) -> Bool {
+        AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanTrue) == .success
     }
 
     /// Whether a window is currently minimized (sitting in the Dock).
     static func isMinimized(_ window: AXUIElement) -> Bool {
+        minimizedStatus(of: window) ?? false
+    }
+
+    static func minimizedStatus(of window: AXUIElement) -> Bool? {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXMinimizedAttribute as CFString, &ref) == .success,
-              let value = ref, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+              let value = ref, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return CFBooleanGetValue((value as! CFBoolean))
     }
 
@@ -132,54 +207,12 @@ enum WindowAX {
     }
 
     /// Whether a window is application-modal (blocks the rest of the app until
-    /// dismissed). Defaults to false when AX can't answer.
-    static func isModal(_ window: AXUIElement) -> Bool {
+    /// dismissed), or nil when AX can't answer.
+    static func modalStatus(of window: AXUIElement) -> Bool? {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &ref) == .success,
-              let value = ref, CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+              let value = ref, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return CFBooleanGetValue((value as! CFBoolean))
-    }
-
-    /// Whether this element is a real, standalone application window — not a sheet,
-    /// dialog, modal panel, or a non-window accessory (e.g. a search-suggestions
-    /// list) that happens to back its own window-server window. Delegates the
-    /// decision to the pure `WindowFilter.isStandaloneWindow` so the rule stays
-    /// unit-testable.
-    static func isStandaloneWindow(_ window: AXUIElement) -> Bool {
-        WindowFilter.isStandaloneWindow(role: role(of: window), subrole: subrole(of: window),
-                                        isModal: isModal(window))
-    }
-
-    /// Whether this window is itself a blocking dialog (a modal alert panel). See
-    /// `WindowFilter.isBlockingDialog`.
-    static func isBlockingDialog(_ window: AXUIElement) -> Bool {
-        WindowFilter.isBlockingDialog(role: role(of: window), subrole: subrole(of: window),
-                                      isModal: isModal(window))
-    }
-
-    /// Whether app `pid` is currently presenting a blocking dialog — the signal that
-    /// it's asking the user something (overwhelmingly "Save changes before
-    /// quitting?") and so shouldn't be force-quit out from under them. Two shapes:
-    ///   - a **standalone modal alert** is its own top-level window, caught directly;
-    ///   - a **sheet** (the slide-down "save?" prompt) is *not* a top-level window —
-    ///     it's a child of the document window — so we also scan each window's
-    ///     children for an `AXSheet`.
-    /// Needs Accessibility; with AX untrusted there are no windows to read and this
-    /// returns false (the caller falls back to its own conservative rule).
-    static func isShowingBlockingDialog(pid: pid_t) -> Bool {
-        for window in windows(of: pid) {
-            if isBlockingDialog(window) { return true }
-            if children(of: window).contains(where: { role(of: $0) == "AXSheet" }) { return true }
-        }
-        return false
-    }
-
-    /// An element's immediate AX children (empty when AX can't answer).
-    private static func children(of element: AXUIElement) -> [AXUIElement] {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
-              let children = ref as? [AXUIElement] else { return [] }
-        return children
     }
 
     private static func stringAttribute(_ window: AXUIElement, _ name: CFString) -> String? {
@@ -210,43 +243,36 @@ enum WindowAX {
     }
 }
 
-/// Reads window titles via Accessibility while memoizing each app's window list,
-/// so a single dock refresh that labels several windows of the same app fetches
-/// that app's AX window array **once** instead of once per window (the fetch is
-/// an IPC round-trip; the per-window title read off the cached list is cheap).
-///
-/// Create a fresh reader per refresh: the memo is intentionally short-lived so it
-/// can never go stale as windows open and close between refreshes — no cache
-/// invalidation, no pruning, no leak.
+/// A refresh-local AX index. Resolve each app's window identities once instead
+/// of walking them through IPC again for every title. No AX objects outlive it.
 public final class WindowTitleReader {
-    private var windowsByPID: [pid_t: [AXUIElement]] = [:]
+    private let trusted = WindowAX.isTrusted
+    private let deadline: TimeInterval
+    private var windowsByPID: [pid_t: [(id: CGWindowID, element: AXUIElement)]] = [:]
 
-    public init() {}
+    public init(deadline: TimeInterval = .infinity) { self.deadline = deadline }
 
-    /// The live title of `windowID`, or nil when AX is untrusted, the window is
-    /// gone, or it exposes no title. Reuses the memoized window list for repeat
-    /// calls on the same app.
     public func title(windowID: CGWindowID, pid: pid_t) -> String? {
-        guard WindowAX.isTrusted else { return nil }
-        guard let window = WindowAX.firstWindow(windowID: windowID, in: windows(of: pid)) else { return nil }
-        return WindowAX.title(of: window)
+        guard trusted, let window = windows(of: pid).first(where: { $0.id == windowID }) else { return nil }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+        return WindowAX.title(of: window.element)
     }
 
-    /// The `CGWindowID` of an app's main window — the one that's frontmost when the
-    /// app itself is frontmost, i.e. the active/forefront window. nil when AX is
-    /// untrusted or the app exposes no main window. Reuses the memoized window list
-    /// (the same one `title` reads), so marking the active window costs no extra IPC
-    /// for an app the dock is already labeling.
     public func mainWindowID(pid: pid_t) -> CGWindowID? {
-        guard WindowAX.isTrusted else { return nil }
-        guard let main = windows(of: pid).first(where: WindowAX.isMain) else { return nil }
-        return WindowAX.cgWindowID(of: main)
+        guard trusted else { return nil }
+        return windows(of: pid).first(where: {
+            ProcessInfo.processInfo.systemUptime < deadline && WindowAX.isMain($0.element)
+        })?.id
     }
 
-    /// This app's AX window list, fetched once per reader lifetime and memoized.
-    private func windows(of pid: pid_t) -> [AXUIElement] {
+    private func windows(of pid: pid_t) -> [(id: CGWindowID, element: AXUIElement)] {
         if let cached = windowsByPID[pid] { return cached }
-        let windows = WindowAX.windows(of: pid)
+        guard ProcessInfo.processInfo.systemUptime < deadline else { return [] }
+        var windows: [(id: CGWindowID, element: AXUIElement)] = []
+        for element in WindowAX.windows(of: pid) {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
+            if let id = WindowAX.cgWindowID(of: element), id != 0 { windows.append((id, element)) }
+        }
         windowsByPID[pid] = windows
         return windows
     }

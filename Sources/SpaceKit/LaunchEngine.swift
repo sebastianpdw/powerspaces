@@ -10,10 +10,11 @@ import Foundation
 public enum LaunchDecision: Equatable, Sendable {
     /// App has a window on the current Space — raise that exact window.
     case focusWindow(windowID: CGWindowID, pid: pid_t)
-    /// App isn't running at all — just open it; first window lands here.
+    /// No real windows — open or reopen the app normally, reusing its process.
     case launchApp
     /// App runs only on other Spaces — make a new window here via this strategy.
     case newWindow(StrategyKind)
+    case warnUnknown
 }
 
 /// What a *dock click* should do — adds the front↔minimize toggle on top of the
@@ -23,6 +24,7 @@ public enum DockClickAction: Equatable, Sendable {
     case minimize(windowID: CGWindowID, pid: pid_t)
     case launch
     case newWindow(StrategyKind)
+    case warnUnknown
 }
 
 /// The heart of powerspaces: decide how to honor "open this app on the desktop
@@ -56,11 +58,25 @@ public enum LaunchEngine {
             case .inactive, .minimized, .hidden:
                 return .raise(windowID: windowID, pid: pid)
             }
+        case .warnUnknown:
+            return .warnUnknown
         case .launchApp:
             return .launch
         case let .newWindow(kind):
             return .newWindow(kind)
         }
+    }
+
+    public static func dockClick(state: AppState, config: StrategyConfig,
+                                 target: AppTarget, forceNew: Bool) -> DockClickAction {
+        if case let .windowHere(id, pid, mode) = state, !forceNew {
+            switch mode {
+            case .active: return .minimize(windowID: id, pid: pid)
+            case .inactive, .hidden, .minimized: return .raise(windowID: id, pid: pid)
+            }
+        }
+        return dockClick(decision: decide(state: state, config: config, target: target, forceNew: forceNew),
+                         isFrontmost: false)
     }
 
     /// Smart-launch decision from a target + snapshot (classifies, then maps the
@@ -90,13 +106,15 @@ public enum LaunchEngine {
         // the caller explicitly asked for a brand-new window.
         case let .windowHere(windowID, pid, _) where !forceNew:
             return .focusWindow(windowID: windowID, pid: pid)
-        // Truly not running → plain cold launch; its first window lands here.
-        case .notRunning:
+        case .windowUnknown:
+            return .warnUnknown
+        // First-window opening is the same operation whether the app's process
+        // already exists or not. Additional-window strategies must not turn a
+        // windowless app into a background-only launch, duplicate or quit request.
+        case .notRunning, .runningWindowless:
             return .launchApp
-        // Running only elsewhere, alive but window-less, or a forced new window over
-        // one that's already here → a fresh window on this desktop via the app's
-        // configured strategy (which is what puts the window on the current Space).
-        case .windowElsewhere, .runningWindowless, .windowHere:
+        // Only apps with an existing window need an additional-window strategy.
+        case .windowElsewhere, .windowHere:
             return .newWindow(config.strategy(for: target.bundleID))
         }
     }

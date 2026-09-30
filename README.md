@@ -13,7 +13,10 @@ It **augments** native Spaces, so you keep your swipe gestures and Mission Contr
 doesn't replace them like AeroSpace/FlashSpace. No SIP changes, no kernel
 extensions, no Screen Recording.
 
-📚 **Docs:** [User guide](docs/user-guide.md) · [Getting started](docs/getting-started.md) · [docs index](docs/README.md)
+**Requires macOS 14 or later, and supports macOS 27.** See the
+[changelog](docs/changelog.md) for what has been verified on which version.
+
+📚 **Docs:** [User guide](docs/user-guide.md) · [Getting started](docs/getting-started.md) · [Changelog](docs/changelog.md) · [docs index](docs/README.md)
 
 ## What it solves
 
@@ -102,10 +105,16 @@ Sources/SpaceKitTestRunner/ # dependency-free test suite
 
 ## Build
 
-Needs the Swift toolchain (Command Line Tools is enough, no full Xcode).
+Needs the Swift toolchain. The `powerspaces` CLI and the tests build with Apple's
+Command Line Tools alone. **The app itself needs Xcode on macOS 27**: SwiftUI's
+`@State` is a macro in the macOS 27 SDK, and its plugin ships with Xcode. (On
+macOS 26 and earlier the Command Line Tools were enough for everything.)
 
 ```sh
-swift build -c release
+swift build -c release --product powerspaces    # the CLI: Command Line Tools are enough
+
+# everything, including the app, on macOS 27: point the build at Xcode
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release
 ```
 
 ## Test
@@ -115,6 +124,15 @@ executable:
 
 ```sh
 swift run spacekit-tests      # prints the assertion count; exit 0 = all green
+```
+
+That covers the `SpaceKit` core. Two scripts cover the rest; both compile into
+`.build/tmp`:
+
+```sh
+swift build && ./scripts/test-ui-lifetimes.sh         # the real GUI sources: refresh scheduling, animations, dock + HUD lifetimes
+./scripts/test-fast-switch.sh                         # the desktop-switch C engine against a fake host (posts no real events)
+PSW_TEST_SANITIZERS=1 ./scripts/test-fast-switch.sh   # the same, under the address + undefined-behaviour sanitizers
 ```
 
 ## CLI
@@ -178,8 +196,15 @@ icon drawing (`Sources/PowerspacesApp/AppIcon.swift`, via a headless
 `PowerspacesApp --export-iconset`), and wraps it with an `Info.plist` whose
 `LSUIElement` flag keeps it a menu-bar-only agent, matching the runtime
 `setActivationPolicy(.accessory)`. The prebuilt Homebrew release is Apple
-Developer-ID signed & notarized; a local `make-app.sh` build is ad-hoc signed,
-which is fine for personal use.
+Developer-ID signed & notarized. A local `make-app.sh` build is ad-hoc signed by
+default, which works, but macOS then sees every rebuild as a new app and asks for
+Accessibility and Automation again. To keep your permissions across rebuilds, sign
+with a certificate of your own:
+
+```sh
+security find-identity -v -p codesigning                  # list your identities
+SIGN_IDENTITY="<identity name>" ./scripts/install-app.sh
+```
 
 ## Configuration
 
@@ -211,17 +236,24 @@ Entries override the built-in defaults; unknown apps use `defaultStrategy`
 - Uses private APIs + (later) an event tap, so it **can't be sandboxed / App
   Store'd** (notarization is fine — it's a malware scan, not App Review). The
   Homebrew release is Developer-ID signed + notarized; a local build is ad-hoc
-  signed (fine for personal use).
+  signed unless you set `SIGN_IDENTITY` (see above).
 
-## Notes / findings (macOS 26)
+## Notes / findings (macOS 26 and 27)
 
-- The private CGS read path works on macOS 26.5 with **SIP enabled**, verified by
-  the live spike (`powerspaces list-windows`).
-- `CGSCopySpacesForWindows` reports the Space id for windows on the **current**
-  Space but returns empty for windows on **other** Spaces. This doesn't affect
-  the engine (current-Space membership and "is it running anywhere" both work),
-  but it means we can't pinpoint *which* other Space a window is on; that's fine for the
-  current-Space-centric features here.
+- The private CGS read path works on macOS 26.5 and on macOS 27.0 with **SIP
+  enabled**, verified by the live spike (`powerspaces list-windows`).
+- The engine relies on `CGSCopySpacesForWindows` reporting a Space for windows on
+  **other** Spaces as well as on the current one: that is what makes an app "open
+  elsewhere". Verified on macOS 27.0.
+- A window the window server lists with **no Space at all** is a leftover: a
+  window its app closed but keeps alive, or a helper surface. It never counts as a
+  window. Version 1.2.4 already treated it that way.
+- **Accessibility lists an app's windows on the visible Space only** (plus its
+  minimized ones). So Accessibility decides which windows on the visible Space are
+  real, and the window server says where the others are.
+- macOS 27 ignores the synthetic Dock-swipe events that macOS 14 to 26 accept. The
+  faster desktop switch sends a different form of the event on macOS 27. On older
+  versions the event carries the same values as before.
 
 ## Roadmap
 

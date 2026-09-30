@@ -39,6 +39,12 @@ powerspaces open   <app> --new       # force a brand-new window
 > **Tip:** `decide` is completely side-effect free. Run it to preview exactly what
 > `open` *would* do before committing.
 
+**Accessibility.** Bringing an existing window to the front needs Accessibility,
+and for the command-line tool that permission belongs to the app that runs it:
+your terminal, or Raycast. Grant it in System Settings → Privacy & Security →
+Accessibility. Without it `open` prints a message that names the permission and
+leaves the window where it is.
+
 ## Pinning from the shell
 
 ```sh

@@ -2,10 +2,19 @@
 
 ## Prerequisites
 
-- macOS 14+ (developed/verified on macOS 26.5).
-- Apple's **Command Line Tools** (full Xcode is *not* required):
+- macOS 14+ (developed and verified on macOS 27.0; releases up to 1.2.4 were
+  verified on macOS 26.5). The Homebrew install below needs nothing else.
+- To build from source: Apple's **Command Line Tools** for the `powerspaces` CLI
+  and the tests.
   ```sh
   xcode-select --install   # only if `swift --version` fails
+  ```
+- To build **the app** on macOS 27: **Xcode**. SwiftUI's `@State` is a macro in the
+  macOS 27 SDK, and its plugin ships with Xcode, not with the Command Line Tools.
+  You do not have to switch your default toolchain; put this in front of a build
+  command:
+  ```sh
+  DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer ./scripts/install-app.sh
   ```
 
 ## Install with Homebrew (easiest)
@@ -53,6 +62,9 @@ open /Applications/Powerspaces.app
 swift build -c release
 ```
 
+On macOS 27, put `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` in
+front (see Prerequisites), or build the CLI alone with `--product powerspaces`.
+
 Binaries land in `.build/release/` (`PowerspacesApp` and the `powerspaces` CLI). To
 run the app straight from the source tree without installing:
 
@@ -76,6 +88,16 @@ executable, so no Xcode is required:
 ```sh
 swift run spacekit-tests     # → all assertions pass, 0 failed
 ```
+
+Two scripts cover what the core suite cannot reach. The first compiles the app's
+own sources, so on macOS 27 it needs Xcode like the app does:
+
+```sh
+swift build && ./scripts/test-ui-lifetimes.sh   # dock refresh, animations, dock + HUD lifetimes
+./scripts/test-fast-switch.sh                   # the desktop-switch engine against a fake host
+```
+
+Neither launches the app or posts a real event.
 
 ---
 

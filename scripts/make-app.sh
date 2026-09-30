@@ -28,16 +28,27 @@ VERSION="${VERSION:-$(cat "$ROOT/VERSION" 2>/dev/null || echo 0.0.0)}"
 # normal (no-sudo) build can overwrite them instead of failing at link time.
 reclaim_build_dir "$ROOT/.build"
 
+# Swift Build in Xcode 27 can stamp the deployment target as the SDK version.
+# Keep the established backend for packaged apps, with the platform's SwiftUI
+# macro plugin available when building against the new SDK. With only the Command
+# Line Tools installed xcrun has no platform path: then there is no plugin path.
+PSW_BUILD_ARGS=(--build-system native)
+PSW_SDK_PLATFORM="$(xcrun --show-sdk-platform-path 2>/dev/null || true)"
+if [ -d "$PSW_SDK_PLATFORM/Developer/usr/lib/swift/host/plugins" ]; then
+    PSW_BUILD_ARGS+=(-Xswiftc -plugin-path -Xswiftc "$PSW_SDK_PLATFORM/Developer/usr/lib/swift/host/plugins")
+fi
+
 echo "› Building release binary…"
-swift build -c release --product "$EXEC_NAME"
+swift build "${PSW_BUILD_ARGS[@]}" -c release --product "$EXEC_NAME"
 BIN="$ROOT/.build/release/$EXEC_NAME"
 
 echo "› Building powerspaces CLI (bundled for the Raycast setup)…"
-swift build -c release --product powerspaces
+swift build "${PSW_BUILD_ARGS[@]}" -c release --product powerspaces
 CLI_BIN="$ROOT/.build/release/powerspaces"
 
 echo "› Rendering AppIcon.icns…"
-WORK="$(mktemp -d)"
+mkdir -p "$ROOT/.build/tmp"
+WORK="$(mktemp -d "$ROOT/.build/tmp/iconset.XXXXXX")"
 ICONSET="$WORK/AppIcon.iconset"
 "$BIN" --export-iconset "$ICONSET"
 
@@ -54,9 +65,16 @@ rm -rf "$WORK"
 echo "› Bundling powerspaces CLI + Raycast extension source…"
 cp "$CLI_BIN" "$APP/Contents/Resources/powerspaces"
 chmod +x "$APP/Contents/Resources/powerspaces"
-rsync -a --delete \
-    --exclude node_modules --exclude dist --exclude .git --exclude '.DS_Store' \
-    "$ROOT/raycast-extension/" "$APP/Contents/Resources/raycast-extension/"
+# In a git checkout only tracked files are copied, so a local file that happens to
+# sit in the folder (an .env, notes) never ships inside the app.
+if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT" ls-files -z -- raycast-extension \
+        | rsync -a --from0 --files-from=- "$ROOT/" "$APP/Contents/Resources/"
+else
+    rsync -a --delete \
+        --exclude node_modules --exclude dist --exclude .git --exclude '.DS_Store' --exclude '.env*' \
+        "$ROOT/raycast-extension/" "$APP/Contents/Resources/raycast-extension/"
+fi
 
 # Bundle the license + third-party notices so they travel with the distributed
 # binary, not just the source repo. A user who only gets the .app (via the
@@ -104,7 +122,19 @@ echo "› Stripping debug symbols (removes embedded build paths)…"
 strip -S "$APP/Contents/MacOS/$APP_NAME"
 strip -S "$APP/Contents/Resources/powerspaces"
 
-# Ad-hoc code-sign the finished bundle, inside-out: the nested CLI first, then the
+# The app declares macOS 14 as its minimum. A toolchain that stamps the SDK version
+# instead builds a binary that older systems refuse to launch, and the machine that
+# built it would not notice.
+echo "› Checking the minimum macOS version of both binaries…"
+for built in "$APP/Contents/MacOS/$APP_NAME" "$APP/Contents/Resources/powerspaces"; do
+    minos="$(vtool -show-build "$built" | awk '$1 == "minos" { print $2; exit }')"
+    if [ "$minos" != "14.0" ]; then
+        echo "✗ $built needs macOS ${minos:-unknown}, expected 14.0" >&2
+        exit 1
+    fi
+done
+
+# Code-sign the finished bundle, inside-out: the nested CLI first, then the
 # app itself (which seals Contents/Resources). swift's linker only ad-hoc-signs the
 # inner executable; the resources copied in above leave that signature inconsistent,
 # so macOS reports "code has no resources but signature indicates they must be
@@ -112,12 +142,27 @@ strip -S "$APP/Contents/Resources/powerspaces"
 # (a Homebrew cask download). Ad-hoc ("-") signing is not a Developer ID and is not
 # notarized, but it produces a valid, launchable bundle (a downloaded copy still
 # needs Gatekeeper cleared once). Developer-ID signing + notarization is the upgrade.
-echo "› Ad-hoc code-signing the bundle…"
-codesign --force --sign - "$APP/Contents/Resources/powerspaces"
-codesign --force --deep --sign - "$APP"
-codesign --verify --deep --strict "$APP" && echo "  ✓ code signature valid"
+#
+# Ad hoc is the default, and it identifies the app by its binary hash: every rebuild
+# is a new app to macOS, which asks again for the permissions you granted
+# (Accessibility, Automation). Set SIGN_IDENTITY to a certificate identity to keep
+# them across rebuilds; list yours with: security find-identity -v -p codesigning
+#
+# No secure timestamp: with a certificate codesign asks Apple's timestamp server by
+# default, and a local build then fails whenever that server does not answer. A
+# release build is signed again with a timestamp, which notarization requires.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+echo "› Code-signing the bundle…"
+codesign --force --timestamp=none --sign "$SIGN_IDENTITY" "$APP/Contents/Resources/powerspaces"
+codesign --force --deep --timestamp=none --sign "$SIGN_IDENTITY" "$APP"
+codesign --verify --deep --strict "$APP"   # on its own line, so a bad signature stops the build
+echo "  ✓ code signature valid"
 
 touch "$APP"   # nudge LaunchServices to notice the new bundle/icon
 
 echo "✓ Built $APP"
 echo "  Run it with:  open \"$APP\""
+if [ "$SIGN_IDENTITY" = - ]; then
+    echo "  Ad-hoc signed: macOS asks for the app's permissions again after every rebuild."
+    echo "  To keep them, set SIGN_IDENTITY (list: security find-identity -v -p codesigning)."
+fi

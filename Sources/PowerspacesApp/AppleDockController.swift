@@ -2,129 +2,131 @@
 // Copyright © 2026 Sebastian Panman de Wit
 // SPDX-License-Identifier: GPL-3.0-only
 
+import AppKit
 import Foundation
+import SpaceKit
 
-/// Hides or restores Apple's built-in Dock, so the Powerspaces bar can stand in
-/// for it. macOS has no real "off switch" for the Dock — `killall Dock` only makes
-/// it respawn, and the process must keep running anyway (Mission Control, the
-/// ⌘-Tab switcher and Stage Manager all rely on it). The established, fully
-/// reversible trick is to force the Dock to auto-hide with an effectively infinite
-/// reveal delay: it never slides into view, yet the process stays alive. We also
-/// shrink it to the smallest tile, so the one reveal no delay can stop — the Dock
-/// that Mission Control / App Exposé / Show Desktop force on screen — is a sliver
-/// rather than a full-size Dock. Re-enabling puts the user's own auto-hide value
-/// and tile size back.
-///
-/// We drive `com.apple.dock` through the `defaults` / `killall` command-line tools
-/// (the same thing a user would type by hand) rather than a private framework, so
-/// the behaviour is transparent and trivially undoable from a terminal if anything
-/// ever goes wrong. The app isn't sandboxed (it already uses private CGS APIs), so
-/// spawning these tools is allowed.
+/// System mutations are journalled independently of Reset Settings. Restarts are
+/// deferred during a mouse drag; no periodic drift handler kills Dock.
+@MainActor
 enum AppleDockController {
-    private static let domain = "com.apple.dock"
-    /// A reveal delay (seconds) so long the Dock will never appear on its own.
-    private static let infiniteDelay = "1000"
-    /// The smallest tile we shrink the Dock to while hidden, so the reveal that
-    /// Mission Control / App Exposé force on screen is a barely-visible sliver.
-    private static let hiddenTileSize = "1"
+    private static let domain = "com.apple.dock" as CFString
+    private static let keys = ["autohide", "autohide-delay", "autohide-time-modifier", "tilesize"]
+    private static let journal = SystemSettingsJournal(url: PowerspacesPaths.configDir.appendingPathComponent("dock-recovery.json"))
+    private static var pending: Bool?
+    private static var retryTimer: Timer?
 
-    /// Make the Apple Dock hidden or visible. The first time we hide it we record
-    /// the user's original auto-hide value (into our own `Preferences`, not the dock
-    /// domain, so it survives even a `defaults delete com.apple.dock`) and restore
-    /// exactly that on re-enable. Each call rewrites the defaults and restarts the
-    /// Dock, so only invoke it when the desired state actually changes.
-    @MainActor static func apply(hidden: Bool) {
-        if hidden {
-            // Capture what the user had before we touched anything — but only the
-            // first time, so re-applying after a relaunch doesn't record our own
-            // forced value as if it were theirs.
-            if Preferences.shared.appleDockAutohideBackup == nil {
-                Preferences.shared.appleDockAutohideBackup = readAutohide()
+    /// `now` skips the wait for a mouse drag to end. Quit and uninstall
+    /// pass it: the retry timer dies with the app, and the Dock would stay hidden.
+    @discardableResult static func apply(hidden: Bool, now: Bool = false) -> Bool {
+        if !now, NativeInteraction.isActive {
+            Log.notice("Apple Dock: hidden=\(hidden) waits for the mouse button to be released")
+            pending = hidden
+            retryTimer?.invalidate()
+            retryTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { _ in
+                MainActor.assumeIsolated { if let pending { _ = apply(hidden: pending) } }
             }
-            write("autohide", "-bool", "true")
-            write("autohide-delay", "-float", infiniteDelay)   // ~never reveals
-            write("autohide-time-modifier", "-float", "0")     // no slide animation
-            // Mission Control / App Exposé / Show Desktop force the Dock visible no
-            // matter the reveal delay, at the user's own tile size — so a normal Dock
-            // shows full-size there. Back up their tile size (first time only) and
-            // shrink it to a sliver; restored on re-enable, like the autohide value.
-            if Preferences.shared.appleDockTilesizeBackup == nil {
-                Preferences.shared.appleDockTilesizeBackup = readTilesize() ?? ""
+            return false
+        }
+        pending = nil; retryTimer?.invalidate(); retryTimer = nil
+        Log.notice("Apple Dock: apply hidden=\(hidden) now=\(now) record=\(journal.exists)")
+        do {
+            if hidden {
+                var originals: [String: Any]?
+                try journal.capture(keys: keys) { key in
+                    if originals == nil { originals = try userOriginals(readingDock: true) }
+                    return try originals?[key].map(encode)
+                }
+                try set("autohide", true)
+                try set("autohide-delay", 1000.0)
+                try set("autohide-time-modifier", 0.0)
+                try set("tilesize", 1)
+            } else {
+                // Migrate legacy recovery before restoring when hiding is disabled.
+                if !journal.exists, Preferences.shared.appleDockAutohideBackup != nil {
+                    let originals = try userOriginals(readingDock: false)
+                    try journal.capture(keys: keys) { key in try originals[key].map(encode) }
+                }
+                guard journal.exists else {
+                    Log.notice("Apple Dock: no recovery record, nothing to restore")
+                    return true
+                }
+                try journal.restore(keys: keys, write: { key, data in
+                    let value = try data.map(decode)
+                    try set(key, value)
+                }, finalize: { try restartDock() })
+                Log.notice("Apple Dock: restored and recovery record removed")
             }
-            write("tilesize", "-int", hiddenTileSize)
-        } else {
-            // Drop our delay overrides and put auto-hide back the way we found it.
-            delete("autohide-delay")
-            delete("autohide-time-modifier")
-            let original = Preferences.shared.appleDockAutohideBackup ?? false
-            write("autohide", "-bool", original ? "true" : "false")
             Preferences.shared.appleDockAutohideBackup = nil
-            // Put the tile size back exactly as we found it ("" = it was unset).
-            if let tile = Preferences.shared.appleDockTilesizeBackup {
-                if tile.isEmpty { delete("tilesize") } else { write("tilesize", "-int", tile) }
-                Preferences.shared.appleDockTilesizeBackup = nil
+            Preferences.shared.appleDockTilesizeBackup = nil
+            if hidden { try restartDock() }
+            return true
+        } catch {
+            Log.error("Apple Dock: \(hidden ? "hide" : "restore") failed, recovery record kept=\(journal.exists): \(error)")
+            HUD.show("Could not update or restore the macOS Dock. Its recovery record was kept for retry.")
+            return false
+        }
+    }
+
+    /// The user's own settings, recorded before the first change. Older releases kept
+    /// only the autohide and tile-size originals, so those win when present. Values
+    /// that are our own hide (a Dock left hidden with its backup lost) are dropped, so
+    /// a restore can never re-hide the Dock.
+    private static func userOriginals(readingDock: Bool) throws -> [String: Any] {
+        var values: [String: Any] = [:]
+        if readingDock { for key in keys { values[key] = try read(key) } }
+        if let old = Preferences.shared.appleDockAutohideBackup {
+            values["autohide"] = old
+            values["autohide-delay"] = nil
+            values["autohide-time-modifier"] = nil
+        }
+        if let old = Preferences.shared.appleDockTilesizeBackup {
+            if old.isEmpty { values["tilesize"] = nil } else {
+                guard let tile = Int(old) else { throw CocoaError(.propertyListReadCorrupt) }
+                values["tilesize"] = tile
             }
         }
-        restartDock()
+        let cleaned = AppleDockOriginals.clean(values)
+        if cleaned.isEmpty, !values.isEmpty {
+            Log.notice("Apple Dock: current settings are a leftover Powerspaces hide \(values); recording macOS defaults instead")
+        }
+        Log.notice("Apple Dock: recording originals \(cleaned)")
+        return cleaned
     }
 
-    /// Re-assert the hidden state if it has drifted back. macOS can flip auto-hide
-    /// off or reset the tile size after sleep/wake or a display attach/rearrange, and
-    /// a Dock utility could rewrite the tile — any of which makes the Dock reappear
-    /// (full-size) during App Exposé / Mission Control. A no-op when the Dock is
-    /// already hidden exactly how we set it, so this is safe to call on every
-    /// screen-change / wake without a needless Dock restart. Only acts while "Hide
-    /// macOS Dock" is on; never touches a Dock the user wants visible.
-    @MainActor static func reassertHiddenIfDrifted() {
-        guard Preferences.shared.hideAppleDock else { return }
-        if readAutohide(), readTilesize() == hiddenTileSize { return } // already as we set it
-        apply(hidden: true)
+    private static func restartDock() throws {
+        let result = ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/killall"), arguments: ["Dock"])
+        Log.notice("Apple Dock: restart result=\(result)")
+        guard result == .exited(0) else { throw CocoaError(.fileWriteUnknown) }
     }
 
-    /// Read `com.apple.dock autohide` as a Bool (false when unset — the Dock's
-    /// out-of-the-box state is always visible).
-    private static func readAutohide() -> Bool {
-        let out = run("/usr/bin/defaults", ["read", domain, "autohide"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out == "1"
+    private static func encode(_ value: Any) throws -> Data {
+        try PropertyListSerialization.data(fromPropertyList: ["value": value], format: .binary, options: 0)
     }
-
-    /// Read `com.apple.dock tilesize` as its raw integer string, or nil when it's
-    /// unset (the Dock then uses its own default size).
-    private static func readTilesize() -> String? {
-        let out = run("/usr/bin/defaults", ["read", domain, "tilesize"])?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (out?.isEmpty == false) ? out : nil
+    private static func decode(_ data: Data) throws -> Any {
+        guard let box = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let value = box["value"] else { throw CocoaError(.propertyListReadCorrupt) }
+        return value
     }
-
-    private static func write(_ key: String, _ args: String...) {
-        _ = run("/usr/bin/defaults", ["write", domain, key] + args)
+    private static func read(_ key: String) throws -> Any? {
+        guard CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) else {
+            Log.error("Apple Dock: could not synchronize preferences before reading \(key)")
+            throw CocoaError(.fileReadUnknown)
+        }
+        return CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
     }
-
-    private static func delete(_ key: String) {
-        _ = run("/usr/bin/defaults", ["delete", domain, key])
-    }
-
-    /// Restart the Dock so it re-reads its preferences. macOS relaunches it
-    /// immediately; without this the new defaults wouldn't take effect.
-    private static func restartDock() {
-        _ = run("/usr/bin/killall", ["Dock"])
-    }
-
-    /// Run a command-line tool and return its stdout, or nil if it couldn't launch
-    /// or exited non-zero. Synchronous: these tools finish in milliseconds.
-    @discardableResult
-    private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: launchPath)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe() // swallow "key does not exist" noise from delete
-        do { try task.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        guard task.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+    private static func set(_ key: String, _ value: Any?) throws {
+        Log.notice("Apple Dock: write \(key)=\(value.map { "\($0)" } ?? "absent")")
+        CFPreferencesSetValue(key as CFString, value as CFPropertyList?, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        guard CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) else {
+            Log.error("Apple Dock: could not synchronize preferences after writing \(key)")
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let actual = CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let matches = value.map { expected in actual.map { ($0 as AnyObject).isEqual(expected) } ?? false } ?? (actual == nil)
+        guard matches else {
+            Log.error("Apple Dock: \(key) read back \(actual.map { "\($0)" } ?? "absent") after the write")
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 }

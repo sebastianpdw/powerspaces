@@ -16,11 +16,11 @@ Certificate of Origin (DCO)** sign-off that every contribution requires.
    discuss approach before code is written. Small fixes (typos, obvious bugs)
    can go straight to a pull request.
 2. **Fork** the repository and create a branch for your change.
-3. **Build it** with the standard Command Line Tools workflow (no full Xcode
-   required):
+3. **Build it.** The CLI and the core tests need only the Command Line Tools. The
+   app needs Xcode on macOS 27 (see [Getting started](docs/getting-started.md)):
    ```
-   swift build
    swift run spacekit-tests   # run the test suite; it should exit 0
+   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build   # everything, on macOS 27
    ```
 4. **Sign off your commits** (see the DCO section below). This is required:
    PRs without sign-off can't be merged.
@@ -135,7 +135,9 @@ project's architecture docs). Please keep changes aligned with them:
   permissions beyond Accessibility without discussion, or leave
   non-reversible state on the user's machine.
 - **Add tests for new logic.** The suite runs with `swift run spacekit-tests`
-  and must pass (exit 0) before a PR is merged.
+  and must pass (exit 0) before a PR is merged. Changes to the GUI or to the
+  desktop-switch C code should also pass `./scripts/test-ui-lifetimes.sh` and
+  `./scripts/test-fast-switch.sh` (see the README's Test section).
 
 ---
 
@@ -143,7 +145,7 @@ project's architecture docs). Please keep changes aligned with them:
 
 When filing a bug, please include:
 
-- Your macOS version (e.g. macOS 26.5) and Mac model (Apple Silicon / Intel).
+- Your macOS version (e.g. macOS 27.0) and Mac model (Apple Silicon / Intel).
 - What you expected to happen vs. what actually happened.
 - Steps to reproduce, ideally minimal.
 - Relevant config from `~/.config/powerspaces/` if the issue is

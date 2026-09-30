@@ -55,9 +55,9 @@ final class JSONPreferencesStore {
     }
 
     /// Clear every user-set value, so the registered defaults apply again.
-    func removeAll() {
+    func removeAll(preserving keys: Set<String> = []) {
         guard !stored.isEmpty else { return }
-        stored.removeAll()
+        stored = stored.filter { keys.contains($0.key) }
         save()
     }
 

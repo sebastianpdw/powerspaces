@@ -8,17 +8,12 @@ import Foundation
 /// already running elsewhere. The right answer is app-dependent — this is the
 /// central, honest limitation of the project.
 public enum StrategyKind: String, Codable, Equatable, CaseIterable, Sendable {
-    /// Make a window on the current Space via a second app instance — but only
-    /// when needed. If the app already owns a real window somewhere (another
-    /// desktop, or here under `forceNew`), spawn a fresh instance (`open -n -a`) so
-    /// activating it can't yank you to that window's Space. If the app is running
-    /// but *window-less* (only spaceless phantoms — e.g. Claude after you ✕ its last
-    /// window), reuse that instance (`open -a`, no -n) instead: its reopen handler
-    /// makes a window here and no duplicate process accumulates. Works only for
-    /// genuinely multi-instance apps; most "single profile" apps (Firefox, Chrome)
-    /// ignore `-n` — use `.openArgs` for those.
+    /// Open an additional window via a second app instance (`open -n -a`). Only
+    /// selected when a real window already exists; windowless apps use the shared
+    /// first-window opener. Works only for genuinely multi-instance apps; most
+    /// single-profile browsers ignore `-n` — use `.openArgs` for those.
     case newInstance
-    /// Run the app's own binary directly with `args` (e.g. `--new-window`). For
+    /// Launch the app bundle through Launch Services with `args` (e.g. `--new-window`). For
     /// browsers/Electron this hands off to the running instance and opens a new
     /// window on the current Space — the most reliable option for them.
     case openArgs
@@ -101,11 +96,10 @@ public struct StrategyConfig: Equatable, Sendable {
 
 extension StrategyConfig {
     /// Shipped per-app defaults. Unknown apps fall back to `.newInstance`, which
-    /// is right for the common multi-window apps and degrades to "focus" on
-    /// single-instance ones.
+    /// is right for the common multi-window apps and warns when no fresh window can be confirmed.
     public static let defaults: StrategyConfig = {
         let entries: [AppStrategy] = [
-            // Browsers/Electron: the binary + --new-window hands off to the
+            // Browsers/Electron: Launch Services delivers --new-window; the app hands off to the
             // running instance and opens a window on the current Space.
             AppStrategy(bundleID: "org.mozilla.firefox", strategy: .openArgs, args: ["--new-window"]),
             AppStrategy(bundleID: "com.google.Chrome", strategy: .openArgs, args: ["--new-window"]),
@@ -115,9 +109,8 @@ extension StrategyConfig {
             // Claude (Electron, single-window, NO single-instance lock): it can't
             // open a second window inside one instance, so when a window already lives
             // on another desktop a new *instance* is what lands a window here without
-            // yanking you there. But `.newInstance` now reuses an idle, window-less
-            // copy (`open -a`, no -n) instead of spawning yet another — so ✕-then-reopen
-            // recycles the lingering process rather than stacking duplicates. This
+            // yanking you there. The shared first-window path reopens an idle copy
+            // before any strategy is selected, avoiding duplicate processes. This
             // matches the global default already, but we pin it so the "open here"
             // behaviour survives any change to that default.
             AppStrategy(bundleID: "com.anthropic.claudefordesktop", strategy: .newInstance),
@@ -148,8 +141,7 @@ extension StrategyConfig {
         // The default for unmapped apps must stay a strategy that opens a window on
         // the *current* desktop and never yanks you to another one — i.e. never
         // `.focusOnly`. `.newInstance` does exactly that for multi-instance-capable
-        // apps (the common case) and degrades to "focus" on genuinely single-instance
-        // ones.
+        // apps (the common case) and warns if no fresh window can be confirmed.
         return StrategyConfig(byBundleID: map, defaultKind: .newInstance)
     }()
 

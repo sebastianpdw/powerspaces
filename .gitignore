@@ -3,7 +3,7 @@
 *.xcodeproj
 .DS_Store
 
-# Claude Code local data (worktrees, job state) — never commit
+# Local tool data (worktrees, job state) — never commit
 .claude/
 
 # Local dev artifacts — never commit
@@ -27,6 +27,20 @@ xcuserdata/
 *.ipa
 *.dSYM.zip
 *.dSYM
+# release artifact
+Powerspaces.app.zip
+
+## Signing & notarization secrets — NEVER commit these
+# Developer ID cert/key exports, App Store Connect API keys, provisioning profiles.
+# A committed key is permanent in git history; if one ever lands here, rotate/revoke it.
+*.p12
+*.p8
+*.cer
+*.pem
+*.key
+*.certSigningRequest
+*.mobileprovision
+AuthKey_*
 
 ## Playgrounds
 timeline.xctimeline

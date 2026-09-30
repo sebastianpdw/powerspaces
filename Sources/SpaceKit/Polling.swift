@@ -14,10 +14,10 @@ import Foundation
 /// main thread (the launcher queue), so the brief wait can't freeze the UI.
 @discardableResult
 func pollUntil(timeout: TimeInterval, interval: useconds_t, _ condition: () -> Bool) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
     repeat {
         if condition() { return true }
         usleep(interval)
-    } while Date() < deadline
+    } while ProcessInfo.processInfo.systemUptime < deadline
     return false
 }

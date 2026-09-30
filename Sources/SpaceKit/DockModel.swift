@@ -26,6 +26,13 @@ public struct DockApp: Equatable, Sendable {
     /// `expandingPerWindow` uses these to give each duplicated icon its own
     /// window.
     public let windowIDs: [CGWindowID]
+    public let windowPIDs: [CGWindowID: pid_t]
+
+    /// A surviving window retains its join/leave identity when a sibling closes.
+    public var slotIdentity: String {
+        if let windowID, let pid { return "\(orderKey):\(pid):\(windowID)" }
+        return orderKey
+    }
     /// When this entry stands for one *specific* window — a duplicated icon from
     /// the "Windows" feature — the id of that window, so a click acts on exactly
     /// it instead of letting the engine pick the app's first window. nil for the
@@ -52,6 +59,7 @@ public struct DockApp: Equatable, Sendable {
                 isPinnedHere: Bool = false, isPinnedEverywhere: Bool = false,
                 isExcludedHere: Bool = false,
                 windowIDs: [CGWindowID] = [], windowID: CGWindowID? = nil,
+                windowPIDs: [CGWindowID: pid_t] = [:],
                 title: String? = nil, isLauncher: Bool = false, isActive: Bool = false) {
         self.bundleID = bundleID
         self.name = name
@@ -61,6 +69,7 @@ public struct DockApp: Equatable, Sendable {
         self.isPinnedEverywhere = isPinnedEverywhere
         self.isExcludedHere = isExcludedHere
         self.windowIDs = windowIDs
+        self.windowPIDs = windowPIDs
         self.windowID = windowID
         self.title = title
         self.isLauncher = isLauncher
@@ -87,7 +96,7 @@ public struct DockApp: Equatable, Sendable {
         DockApp(bundleID: bundleID, name: name, pid: pid, windowCount: windowCount,
                 isPinnedHere: isPinnedHere, isPinnedEverywhere: isPinnedEverywhere,
                 isExcludedHere: isExcludedHere,
-                windowIDs: windowIDs, windowID: windowID, title: title,
+                windowIDs: windowIDs, windowID: windowID, windowPIDs: windowPIDs, title: title,
                 isLauncher: isLauncher, isActive: isActive)
     }
 
@@ -96,7 +105,7 @@ public struct DockApp: Equatable, Sendable {
         DockApp(bundleID: bundleID, name: name, pid: pid, windowCount: windowCount,
                 isPinnedHere: isPinnedHere, isPinnedEverywhere: isPinnedEverywhere,
                 isExcludedHere: isExcludedHere,
-                windowIDs: windowIDs, windowID: windowID, title: title,
+                windowIDs: windowIDs, windowID: windowID, windowPIDs: windowPIDs, title: title,
                 isLauncher: isLauncher, isActive: isActive)
     }
 
@@ -156,10 +165,8 @@ public enum DockModel {
     ///   still belongs to a desktop — but only *its own*. It counts here only when
     ///   its Space is `visibleSpace`; a window minimized on a different desktop of
     ///   the same display must not leak into this one's dock.
-    /// - When the window server reports **no Space** for it (membership is only
-    ///   reliable for the active display), fall back to "yes" so a minimized window
-    ///   on a *secondary* display still shows — the geometric `isOnDisplay` test the
-    ///   caller pairs this with then scopes it to the right bar.
+    /// - When membership is unavailable, only an onscreen window can be established
+    ///   as visible by geometry. Hidden/minimized windows remain unknown.
     /// - Anything else off-screen (a hidden-desktop window, an off-screen
     ///   placeholder) is not on the visible bar.
     private static func isOnVisibleDesktop(_ window: WindowInfo, visibleSpace: SpaceID) -> Bool {
@@ -168,10 +175,9 @@ public enum DockModel {
         // windows slide in (the old `isOnVisibleSpace` guard then dropped them, so the
         // bar emptied and refilled). A window positively on this desktop's Space is
         // here regardless of onscreen; one on a *different* Space is not; and one the
-        // server reports no Space for falls back to onscreen/minimized/hidden.
-        if window.isOn(visibleSpace) { return true }
-        if !window.spaceIDs.isEmpty { return false }
-        return window.isOnVisibleSpace
+        // server reports no Space for falls back to onscreen only.
+        if !window.spaceIDs.isEmpty { return window.isOn(visibleSpace) }
+        return window.isOnscreen
     }
 
     /// Group a window list into one `DockApp` per app (by bundle id, else owner
@@ -188,7 +194,9 @@ public enum DockModel {
             guard let windows = groups[key], let first = windows.first else { return nil }
             return DockApp(bundleID: first.bundleID, name: first.ownerName, pid: first.pid,
                            windowCount: windows.count,
-                           windowIDs: windows.map(\.windowID).sorted())
+                           windowIDs: windows.map(\.windowID).sorted(),
+                           windowPIDs: Dictionary(windows.map { ($0.windowID, $0.pid) },
+                                                  uniquingKeysWith: { first, _ in first }))
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -289,7 +297,7 @@ public enum DockModel {
                                windowCount: runningApp.windowCount,
                                isPinnedHere: here, isPinnedEverywhere: everywhere,
                                isExcludedHere: excluded,
-                               windowIDs: runningApp.windowIDs)
+                               windowIDs: runningApp.windowIDs, windowPIDs: runningApp.windowPIDs)
             }
             guard let name = nameForBundleID(bundleID) else { return nil }
             return DockApp(bundleID: bundleID, name: name, pid: nil, windowCount: 0,
@@ -309,7 +317,7 @@ public enum DockModel {
                 return DockApp(bundleID: app.bundleID, name: app.name, pid: app.pid,
                                windowCount: app.windowCount,
                                isPinnedEverywhere: true, isExcludedHere: true,
-                               windowIDs: app.windowIDs)
+                               windowIDs: app.windowIDs, windowPIDs: app.windowPIDs)
             }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         result.append(contentsOf: rest)
@@ -330,23 +338,50 @@ public enum DockModel {
     /// so the dock can show the icon duplicated ("Windows" feature: two Firefox
     /// icons when two Firefox windows are open here). Each copy is tagged with
     /// its own `windowID` so a click acts on that exact window. An app with 0 or
-    /// 1 windows — including a pinned-but-not-running shortcut — yields a single,
-    /// untagged entry, so the off state is just the identity transform.
+    /// 1 windows yields one entry; real windows always retain their exact identity.
+    /// Pinned-but-not-running shortcuts remain untagged.
     ///
     /// Duplicates stay adjacent and keep the same `orderKey`, so the saved
     /// arrangement (which de-dupes by `orderKey`) and drag-to-reorder treat all
     /// copies of an app as one unit.
     public static func expandingPerWindow(_ apps: [DockApp]) -> [DockApp] {
         apps.flatMap { app -> [DockApp] in
-            guard app.windowIDs.count > 1 else { return [app] }
+            guard !app.windowIDs.isEmpty else { return [app] }
             return app.windowIDs.map { id in
-                DockApp(bundleID: app.bundleID, name: app.name, pid: app.pid,
+                DockApp(bundleID: app.bundleID, name: app.name, pid: app.windowPIDs[id] ?? app.pid,
                         windowCount: app.windowCount,
                         isPinnedHere: app.isPinnedHere, isPinnedEverywhere: app.isPinnedEverywhere,
                         isExcludedHere: app.isExcludedHere,
-                        windowIDs: app.windowIDs, windowID: id, title: app.title)
+                        windowIDs: app.windowIDs, windowID: id, windowPIDs: app.windowPIDs,
+                        title: app.title, isLauncher: app.isLauncher, isActive: app.isActive)
             }
         }
+    }
+
+    /// The `slotIdentity`s that leave and enter the dock going from `old` to `new`.
+    /// An app in both lists changes only by its icon count: an identity that was
+    /// replaced in place (a pinned app's last window closed, or it launched) pairs
+    /// off against its replacement, so that icon neither leaves nor enters.
+    public static func slotChanges(from old: [DockApp], to new: [DockApp]) -> (leaving: Set<String>, entering: Set<String>) {
+        let oldKeys = Set(old.map(\.slotIdentity)), newKeys = Set(new.map(\.slotIdentity))
+        let gone = Dictionary(grouping: old.filter { !newKeys.contains($0.slotIdentity) }, by: \.orderKey)
+        let come = Dictionary(grouping: new.filter { !oldKeys.contains($0.slotIdentity) }, by: \.orderKey)
+        let leaving = gone.flatMap { key, apps in apps.dropFirst(come[key]?.count ?? 0) }
+        let entering = come.flatMap { key, apps in apps.dropFirst(gone[key]?.count ?? 0) }
+        return (Set(leaving.map(\.slotIdentity)), Set(entering.map(\.slotIdentity)))
+    }
+
+    /// Move every window icon for an app together, matching app-level persistence.
+    /// The insertion index counts only icons belonging to other apps.
+    public static func reorderingGroup(_ apps: [DockApp], key: String, insertion: Int) -> [DockApp] {
+        let group = apps.filter { $0.orderKey == key }
+        guard !group.isEmpty else { return apps }
+        let others = apps.filter { $0.orderKey != key }
+        var index = min(max(0, insertion), others.count)
+        while index > 0, index < others.count, others[index - 1].orderKey == others[index].orderKey {
+            index += 1 // Never split another app's group either.
+        }
+        return Array(others.prefix(index)) + group + Array(others.dropFirst(index))
     }
 
     /// Reorders `apps` to match the user's saved arrangement. Apps whose

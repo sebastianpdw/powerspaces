@@ -2,9 +2,12 @@
 // Copyright © 2026 Sebastian Panman de Wit
 // SPDX-License-Identifier: GPL-3.0-only
 
+import ApplicationServices
 import CoreGraphics
 import Foundation
+import Darwin
 import SpaceKit
+import CSpaceSwitch
 
 // A tiny, dependency-free test harness. XCTest and Swift Testing are not
 // available with Command Line Tools only, so the suite runs as a plain
@@ -52,13 +55,29 @@ final class Harness {
     }
 }
 
+// Only this isolated worker mode is spawned by the concurrency regression test.
+if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--pin-worker" {
+    let store = PinStore(url: URL(fileURLWithPath: CommandLine.arguments[2]))
+    for i in 0..<30 { if !store.pin(CommandLine.arguments[3] + ".\(i)", onSpace: "concurrent") { exit(1) } }
+    exit(0)
+}
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--pin-lock-worker" {
+    let path = CommandLine.arguments[2]
+    let fd = Darwin.open(path + ".lock", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    guard fd >= 0, flock(fd, LOCK_EX) == 0 else { exit(1) }
+    try Data("ready".utf8).write(to: URL(fileURLWithPath: path + ".ready"))
+    usleep(800_000)
+    Darwin.close(fd)
+    exit(0)
+}
+
 let h = Harness()
 
 // MARK: - Helpers
 
 func win(_ id: CGWindowID, _ pid: pid_t = 100, name: String = "App",
          bundle: String? = nil, spaces: [SpaceID]) -> WindowInfo {
-    WindowInfo(windowID: id, pid: pid, ownerName: name, bundleID: bundle, spaceIDs: spaces)
+    WindowInfo(windowID: id, pid: pid, ownerName: name, bundleID: bundle, spaceIDs: spaces, isOnscreen: !spaces.isEmpty)
 }
 
 struct FakeProvider: SpaceProviding {
@@ -95,7 +114,7 @@ h.test("classify: window only on another Space → windowElsewhere") {
     h.eq(AppState.classify(target: firefox, snapshot: snap), .windowElsewhere)
 }
 
-h.test("classify: only spaceless phantoms + running → runningWindowless (Claude after ✕)") {
+h.test("classify: only windows on no desktop + running → runningWindowless (Claude after ✕)") {
     // ✕-closing Claude's last window leaves the process alive owning only off-screen
     // placeholder windows that belong to no Space (empty spaceIDs). Those ghosts must
     // NOT read as "a window on another desktop" — otherwise we'd spawn a brand-new
@@ -109,8 +128,8 @@ h.test("classify: only spaceless phantoms + running → runningWindowless (Claud
     h.eq(AppState.classify(target: claude, snapshot: snap), .runningWindowless)
 }
 
-h.test("classify: a real window elsewhere outranks a spaceless phantom → windowElsewhere") {
-    // A phantom alongside a genuine window on another desktop must not downgrade the
+h.test("classify: a real window elsewhere outranks a window on no desktop → windowElsewhere") {
+    // A leftover alongside a genuine window on another desktop must not downgrade the
     // app to windowless — there really is a window to avoid yanking to.
     let snap = SpaceSnapshot(activeSpaceID: 2, windows: [
         win(10, 100, name: "Firefox", bundle: "org.mozilla.firefox", spaces: []),
@@ -119,26 +138,23 @@ h.test("classify: a real window elsewhere outranks a spaceless phantom → windo
     h.eq(AppState.classify(target: firefox, snapshot: snap), .windowElsewhere)
 }
 
-h.test("classify: spaceless phantoms but not in the running set → notRunning") {
+h.test("classify: windows on no desktop but not in the running set → notRunning") {
     // Defensive: if only ghost windows linger and the process is gone from the
-    // running set, the app is truly absent — a phantom alone never means "running".
+    // running set, the app is truly absent — a leftover alone never means "running".
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
         win(10, 100, name: "Firefox", bundle: "org.mozilla.firefox", spaces: []),
     ], runningBundleIDs: [])
     h.eq(AppState.classify(target: firefox, snapshot: snap), .notRunning)
 }
 
-h.test("classify→decide: a windowless Claude reopens here via newInstance (which reuses)") {
-    // End-to-end guard tying the phantom classification to Claude's pinned strategy:
-    // the ghost classifies as runningWindowless and decides newWindow(.newInstance).
-    // (The launcher's .newInstance case then reuses the idle instance with `open -a`
-    // rather than spawning a duplicate — proven live on-device.)
+h.test("classify→decide: a windowless Claude uses an ordinary reopen") {
+    // Spaceless helpers must not select a second-instance strategy.
     let claude = AppTarget(bundleID: "com.anthropic.claudefordesktop", name: "Claude")
     let snap = SpaceSnapshot(activeSpaceID: 100, windows: [
         win(25961, 1215, name: "Claude", bundle: "com.anthropic.claudefordesktop", spaces: []),
     ], runningBundleIDs: ["com.anthropic.claudefordesktop"])
     h.eq(LaunchEngine.decide(target: claude, snapshot: snap, config: config, forceNew: false),
-         .newWindow(.newInstance))
+         .launchApp)
 }
 
 h.test("classify: window here, no frontmost info → windowHere(.inactive)") {
@@ -193,7 +209,7 @@ h.test("decide(state:) is the launch transition table — one state → one deci
     h.eq(LaunchEngine.decide(state: .notRunning, config: config, target: target, forceNew: false),
          .launchApp)
     h.eq(LaunchEngine.decide(state: .runningWindowless, config: config, target: target, forceNew: false),
-         .newWindow(.openArgs))
+         .launchApp)
     h.eq(LaunchEngine.decide(state: .windowElsewhere, config: config, target: target, forceNew: false),
          .newWindow(.openArgs))
     let here = AppState.windowHere(windowID: 10, pid: 100, mode: .inactive)
@@ -240,23 +256,21 @@ h.test("new window when running only on another Space (core fix, issues 1 & 2)")
          .newWindow(.openArgs))
 }
 
-h.test("running window-less app makes a new window, not a cold launch (Finder after Quit-all)") {
-    // "Quit (all desktops)" terminates Finder; macOS auto-relaunches it with no
-    // windows. The decision must route to its new-window strategy (make new
-    // Finder window) instead of a plain `open -a`, which spawns nothing.
+h.test("windowless Finder uses the ordinary open path and its folder-open primitive") {
+    // The shared opener already opens a folder for Finder; it does not merely activate it.
     let finder = AppTarget(bundleID: "com.apple.finder", name: "Finder")
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [],
                              runningBundleIDs: ["com.apple.finder"])
     h.eq(LaunchEngine.decide(target: finder, snapshot: snap, config: config, forceNew: false),
-         .newWindow(.appleScript))
+         .launchApp)
 }
 
-h.test("a running window-less app still gets a new window under forceNew") {
+h.test("forceNew with no existing window still uses the ordinary open path") {
     let finder = AppTarget(bundleID: "com.apple.finder", name: "Finder")
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [],
                              runningBundleIDs: ["com.apple.finder"])
     h.eq(LaunchEngine.decide(target: finder, snapshot: snap, config: config, forceNew: true),
-         .newWindow(.appleScript))
+         .launchApp)
 }
 
 h.test("truly-not-running app still cold-launches (no running set entry)") {
@@ -482,8 +496,8 @@ h.test("expands an app into one entry per window") {
     // Duplicates stay adjacent and keep the same identity/order key.
     h.eq(expanded[0].orderKey, expanded[1].orderKey)
     // Each Firefox copy is tagged with its own window (so a click hits that exact
-    // one); the lone Notes icon stays untagged.
-    h.eq(expanded.map(\.windowID), [CGWindowID(10), CGWindowID(11), nil])
+    // one); the lone Notes icon keeps its exact identity too.
+    h.eq(expanded.map(\.windowID), [CGWindowID(10), CGWindowID(11), CGWindowID(20)])
 }
 
 h.test("base apps carry their windows on the current Space (ascending)") {
@@ -496,12 +510,12 @@ h.test("base apps carry their windows on the current Space (ascending)") {
     h.ok(app?.windowID == nil)     // the un-expanded entry has no specific window
 }
 
-h.test("a single-window app is left untouched") {
+h.test("a single-window app retains exact window identity") {
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
         win(10, 100, name: "Firefox", bundle: "org.mozilla.firefox", spaces: [1]),
     ])
     let apps = DockModel.apps(onCurrentSpace: snap)
-    h.eq(DockModel.expandingPerWindow(apps), apps) // identity transform
+    h.eq(DockModel.expandingPerWindow(apps).first?.windowID, CGWindowID(10))
 }
 
 h.test("a pinned-but-not-running app yields exactly one entry") {
@@ -966,7 +980,7 @@ h.test("expand on → one entry per window for multi-window apps") {
     h.eq(apps.map(\.name), ["Firefox", "Firefox", "Notes"])
     h.ok(apps[0].windowID == 10)
     h.ok(apps[1].windowID == 11)
-    h.ok(apps[2].windowID == nil, "a single-window app is left untagged")
+    h.ok(apps[2].windowID == 20, "a single-window app keeps its exact identity")
 }
 
 h.test("labels on → each labeled item gets its own window's title") {
@@ -1005,7 +1019,7 @@ h.test("a pinned-but-not-running app never triggers a title read") {
     h.eq(titleCalls, 1, "only the one running window (Firefox) is read")
 }
 
-// MARK: - WindowFilter (real-vs-phantom window predicate)
+// MARK: - WindowFilter.isRealWindow (the geometry pass; verdicts are in WindowVerdictTests)
 
 print("WindowFilter")
 h.test("keeps real windows (Safari/Finder real windows observed)") {
@@ -1033,85 +1047,6 @@ h.test("threshold is inclusive at the minimum size") {
     h.ok(WindowFilter.isRealWindow(layer: 0, alpha: 1, width: m, height: m))
     h.ok(!WindowFilter.isRealWindow(layer: 0, alpha: 1, width: m - 1, height: m))
     h.ok(!WindowFilter.isRealWindow(layer: 0, alpha: 1, width: m, height: m - 1))
-}
-h.test("active-space phantom: claims current Space, not onscreen, not minimized") {
-    // The full-size placeholder that briefly claims the current Space.
-    h.ok(WindowFilter.isActiveSpacePhantom(claimsActiveSpace: true, isOnscreen: false))
-}
-h.test("active-space: real onscreen window (stacked) is kept") {
-    h.ok(!WindowFilter.isActiveSpacePhantom(claimsActiveSpace: true, isOnscreen: true))
-}
-h.test("active-space: minimized window is kept (icon stays in the dock)") {
-    // A minimized window sits in the Dock with onscreen=false but is real — it
-    // must not be dropped, or a minimized-only app vanishes from the dock.
-    h.ok(!WindowFilter.isActiveSpacePhantom(
-        claimsActiveSpace: true, isOnscreen: false, isMinimized: true))
-}
-h.test("active-space: ⌘-hidden window is kept (app stays clickable in the dock)") {
-    // A ⌘-hidden app's windows are off-screen and not minimized but are real —
-    // dropping them would make hiding an app erase it from the dock.
-    h.ok(!WindowFilter.isActiveSpacePhantom(
-        claimsActiveSpace: true, isOnscreen: false, isMinimized: false, isHidden: true))
-}
-h.test("other-space windows are never treated as phantoms") {
-    // Windows on other Spaces always report onscreen=false; we must keep them so
-    // the engine still knows the app runs elsewhere.
-    h.ok(!WindowFilter.isActiveSpacePhantom(claimsActiveSpace: false, isOnscreen: false))
-    h.ok(!WindowFilter.isActiveSpacePhantom(claimsActiveSpace: false, isOnscreen: true))
-}
-
-// MARK: - WindowFilter.isStandaloneWindow (real-window-vs-impostor predicate)
-//
-// Values are the live AX readings from the verification probes: a standalone
-// window, a modal alert panel, a sheet, and Safari's search-suggestions list.
-h.test("a real standalone window counts (a new Safari window)") {
-    h.ok(WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: "AXStandardWindow", isModal: false))
-    // Only the role is required, so floating/utility/full-screen windows count too.
-    h.ok(WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: "AXFloatingWindow", isModal: false))
-    h.ok(WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: nil, isModal: false))
-}
-h.test("a modal alert panel is not a standalone window") {
-    h.ok(!WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: "AXDialog", isModal: true))
-    // A system dialog, and modal alone, also disqualify it.
-    h.ok(!WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: "AXSystemDialog", isModal: false))
-    h.ok(!WindowFilter.isStandaloneWindow(role: "AXWindow", subrole: "AXStandardWindow", isModal: true))
-}
-h.test("a sheet is not a standalone window (the System Settings popup)") {
-    // role AXSheet, no subrole, not flagged modal.
-    h.ok(!WindowFilter.isStandaloneWindow(role: "AXSheet", subrole: nil, isModal: false))
-}
-h.test("Safari's search-suggestions list is not a standalone window (role AXScrollArea)") {
-    // Typing in the smart-search field surfaces an AXScrollArea as its own
-    // window-server window next to the page window — it must not add a 2nd icon.
-    h.ok(!WindowFilter.isStandaloneWindow(role: "AXScrollArea", subrole: nil, isModal: false))
-}
-h.test("an unreadable AX kind is not counted as a standalone window") {
-    // The provider keeps all of an app's windows when it finds no standalone window
-    // at all, so treating a nil role as 'not a window' here can't erase an app.
-    h.ok(!WindowFilter.isStandaloneWindow(role: nil, subrole: nil, isModal: false))
-}
-
-// MARK: - WindowFilter.isBlockingDialog (spare a save prompt from "Quit (all desktops)")
-
-h.test("a save sheet is a blocking dialog (role AXSheet)") {
-    h.ok(WindowFilter.isBlockingDialog(role: "AXSheet", subrole: nil, isModal: false))
-}
-h.test("a modal alert panel is a blocking dialog") {
-    h.ok(WindowFilter.isBlockingDialog(role: "AXWindow", subrole: "AXDialog", isModal: true))
-    h.ok(WindowFilter.isBlockingDialog(role: "AXWindow", subrole: "AXSystemDialog", isModal: false))
-    h.ok(WindowFilter.isBlockingDialog(role: "AXWindow", subrole: "AXStandardWindow", isModal: true))
-}
-h.test("a normal window is not a blocking dialog (WhatsApp gets force-quit)") {
-    h.ok(!WindowFilter.isBlockingDialog(role: "AXWindow", subrole: "AXStandardWindow", isModal: false))
-    h.ok(!WindowFilter.isBlockingDialog(role: "AXWindow", subrole: nil, isModal: false))
-}
-h.test("a non-window accessory is not mistaken for a blocking dialog (no spurious spare)") {
-    // A search-suggestions AXScrollArea isn't a standalone window, but it's not a
-    // dialog either — it must not keep an app alive as if it were a save prompt.
-    h.ok(!WindowFilter.isBlockingDialog(role: "AXScrollArea", subrole: nil, isModal: false))
-}
-h.test("an unreadable AX kind is not treated as a blocking dialog") {
-    h.ok(!WindowFilter.isBlockingDialog(role: nil, subrole: nil, isModal: false))
 }
 
 // MARK: - DockModel: per-display content (multi-display)
@@ -1144,7 +1079,7 @@ h.test("a display's dock shows only the apps on that display's visible Space") {
 h.test("a minimized window keeps its app on the display it was minimized from") {
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
         dwin(30, 300, name: "Slack", bundle: "com.tinyspeck.slackmacgap",
-             rect: CGRect(x: 200, y: 200, width: 700, height: 500), onscreen: false, minimized: true),
+             rect: CGRect(x: 200, y: 200, width: 700, height: 500), onscreen: false, minimized: true, spaces: [1]),
     ])
     h.eq(DockModel.apps(onDisplay: leftDisplay, snapshot: snap).map(\.name), ["Slack"],
          "minimized app stays in its display's dock")
@@ -1179,7 +1114,7 @@ h.test("a window minimized on another desktop of this display is excluded") {
     let onTwo = DockModel.apps(onDisplay: leftDisplay, snapshot: viewingTwo, visibleSpace: 2)
     h.eq(onTwo.first?.windowCount, 1, "and it shows once on its own desktop")
 }
-h.test("a minimized window with unknown Space (secondary display) still shows") {
+h.test("a minimized window with unknown Space is not assumed to be on the visible desktop") {
     // macOS only reports Space membership for the active display; an empty set means
     // "unknown", so the geometric test must still keep a minimized window in the bar.
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
@@ -1188,7 +1123,7 @@ h.test("a minimized window with unknown Space (secondary display) still shows") 
              onscreen: false, minimized: true, spaces: []),
     ])
     h.eq(DockModel.apps(onDisplay: rightDisplay, snapshot: snap, visibleSpace: 9).map(\.name),
-         ["Slack"], "unknown-Space minimized window falls back to geometry")
+         [], "unknown-Space minimized window requires membership before desktop-scoped actions")
 }
 h.test("a window parked on a display's hidden desktop is excluded") {
     let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
@@ -1204,7 +1139,7 @@ h.test("a ⌘-hidden window keeps its app on the display it was hidden on") {
         // off-screen + not minimized but hidden (⌘H) = still on the visible bar.
         dwin(50, 500, name: "Music", bundle: "com.apple.Music",
              rect: CGRect(x: 200, y: 200, width: 700, height: 500),
-             onscreen: false, minimized: false, hidden: true),
+             onscreen: false, minimized: false, hidden: true, spaces: [1]),
     ])
     h.eq(DockModel.apps(onDisplay: leftDisplay, snapshot: snap).map(\.name), ["Music"],
          "a hidden app stays in its display's dock")
@@ -1376,6 +1311,9 @@ h.test("single display: a window on it never moves") {
 
 // MARK: - Live provider smoke (skips if CGS is unavailable)
 
+runWindowVerdictTests(h)
+runRepairTests(h)
+
 print("Live provider (integration)")
 h.test("current Space is readable, or skipped") {
     do {
@@ -1383,6 +1321,37 @@ h.test("current Space is readable, or skipped") {
         h.ok(id > 0, "expected a real Space id")
     } catch {
         print("      ~ skipped: CGS unavailable (\(error))")
+    }
+}
+h.test("a live scan completes twice and counts every window's owner, or skipped") {
+    do {
+        let provider = CGSSpaceProvider()
+        for _ in 0..<2 {
+            let snapshot = try provider.snapshot()
+            h.ok(Set(snapshot.windows.map(\.pid)).isSubset(of: snapshot.windowOwnerPIDs))
+            print("      ~ live scan: \(snapshot.windows.count) real windows, \(snapshot.windowOwnerPIDs.count) owners,"
+                  + " accessibility trusted=\(AXIsProcessTrusted())")
+        }
+    } catch {
+        print("      ~ skipped: window server unavailable (\(error))")
+    }
+}
+h.test("a live scan of one app returns that app's windows only, or skipped") {
+    do {
+        let provider = CGSSpaceProvider()
+        let finder = AppTarget(bundleID: "com.apple.finder", name: "Finder")
+        var started = ProcessInfo.processInfo.systemUptime
+        let everything = try provider.snapshot()
+        let fullMs = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+        started = ProcessInfo.processInfo.systemUptime
+        let scoped = try provider.snapshot(of: finder)
+        let scopedMs = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+        h.ok(scoped.windows.allSatisfy { finder.matches($0) })
+        h.eq(Set(scoped.windows.map(\.windowID)), Set(everything.windows(of: finder).map(\.windowID)))
+        h.eq(scoped.isRunning(finder), everything.isRunning(finder))
+        print("      ~ live scan: all apps \(fullMs) ms, one app \(scopedMs) ms")
+    } catch {
+        print("      ~ skipped: window server unavailable (\(error))")
     }
 }
 

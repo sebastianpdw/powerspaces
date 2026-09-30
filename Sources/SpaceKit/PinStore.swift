@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import Foundation
+import Darwin
 
 /// Pure, testable model of pinned apps. A pin is either scoped to one desktop
 /// (keyed by the Space's persistent UUID) or to **all** desktops. An all-desktops
@@ -117,6 +118,22 @@ public struct PinModel: Equatable, Sendable {
         else { excludeEverywhere(bundleID, onSpace: uuid) }
     }
 
+    /// Visible keys fill their old slots in the new order; absent keys retain
+    /// their saved slots. New keys append. An explicit setOrder([]) still resets.
+    public mutating func reorderVisible(_ keys: [String], onSpace uuid: String) {
+        let visible = keys.uniqued()
+        let visibleSet = Set(visible)
+        var remaining = ArraySlice(visible)
+        var merged: [String] = []
+        for old in order(onSpace: uuid).uniqued() {
+            if visibleSet.contains(old) {
+                if let next = remaining.popFirst() { merged.append(next) }
+            } else { merged.append(old) }
+        }
+        merged.append(contentsOf: remaining)
+        setOrder(merged, onSpace: uuid)
+    }
+
     /// Forget every desktop's exception for this bundle id (used when the
     /// all-desktops pin itself is added or removed).
     private mutating func clearEverywhereExceptions(_ bundleID: String) {
@@ -141,11 +158,11 @@ extension PinModel: Codable {
     // Migration-safe: missing keys decode to empty, so older pins.json still loads.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        pinsBySpace = (try? c.decode([String: [String]].self, forKey: .pinsBySpace)) ?? [:]
-        everywhere = (try? c.decode([String].self, forKey: .everywhere)) ?? []
+        pinsBySpace = try c.decodeIfPresent([String: [String]].self, forKey: .pinsBySpace) ?? [:]
+        everywhere = try c.decodeIfPresent([String].self, forKey: .everywhere) ?? []
         everywhereExceptionsBySpace =
-            (try? c.decode([String: [String]].self, forKey: .everywhereExceptionsBySpace)) ?? [:]
-        orderBySpace = (try? c.decode([String: [String]].self, forKey: .orderBySpace)) ?? [:]
+            try c.decodeIfPresent([String: [String]].self, forKey: .everywhereExceptionsBySpace) ?? [:]
+        orderBySpace = try c.decodeIfPresent([String: [String]].self, forKey: .orderBySpace) ?? [:]
     }
 }
 
@@ -153,32 +170,71 @@ extension PinModel: Codable {
 public final class PinStore {
     private var model: PinModel
     private let url: URL
+    private let mutex = NSLock()
 
     public init(url: URL) {
         self.url = url
-        self.model = PinStore.read(url) ?? PinModel()
+        self.model = JSONFileStore.read(PinModel.self, from: url) ?? PinModel()
     }
 
-    public func spacePins(onSpace uuid: String) -> [String] { model.spacePins(onSpace: uuid) }
-    public func everywherePins() -> [String] { model.everywherePins() }
-    public func everywhereExceptions(onSpace uuid: String) -> [String] { model.everywhereExceptions(onSpace: uuid) }
-    public func isPinned(_ b: String, onSpace uuid: String) -> Bool { model.isPinned(b, onSpace: uuid) }
-
-    public func pin(_ b: String, onSpace uuid: String) { model.pin(b, onSpace: uuid); save() }
-    public func unpin(_ b: String, onSpace uuid: String) { model.unpin(b, onSpace: uuid); save() }
-    public func toggle(_ b: String, onSpace uuid: String) { model.toggle(b, onSpace: uuid); save() }
-    public func pinEverywhere(_ b: String) { model.pinEverywhere(b); save() }
-    public func unpinEverywhere(_ b: String) { model.unpinEverywhere(b); save() }
-    public func toggleEverywhere(_ b: String) { model.toggleEverywhere(b); save() }
-    public func toggleEverywhereException(_ b: String, onSpace uuid: String) { model.toggleEverywhereException(b, onSpace: uuid); save() }
-
-    public func order(onSpace uuid: String) -> [String] { model.order(onSpace: uuid) }
-    public func setOrder(_ keys: [String], onSpace uuid: String) { model.setOrder(keys, onSpace: uuid); save() }
-
+    /// Poll-driven readers adopt external CLI changes without rewriting them.
+    @discardableResult public func reload() -> PinModel {
+        mutex.lock(); defer { mutex.unlock() }
+        if let current = try? read() { model = current }
+        return model
+    }
+    private func view<T>(_ body: (PinModel) -> T) -> T {
+        mutex.lock(); defer { mutex.unlock() }
+        return body(model)
+    }
+    public func spacePins(onSpace uuid: String) -> [String] { view { $0.spacePins(onSpace: uuid) } }
+    public func everywherePins() -> [String] { view { $0.everywherePins() } }
+    public func everywhereExceptions(onSpace uuid: String) -> [String] { view { $0.everywhereExceptions(onSpace: uuid) } }
+    public func isPinned(_ b: String, onSpace uuid: String) -> Bool { view { $0.isPinned(b, onSpace: uuid) } }
+    @discardableResult public func pin(_ b: String, onSpace uuid: String) -> Bool { mutate { $0.pin(b, onSpace: uuid) } }
+    @discardableResult public func unpin(_ b: String, onSpace uuid: String) -> Bool { mutate { $0.unpin(b, onSpace: uuid) } }
+    @discardableResult public func toggle(_ b: String, onSpace uuid: String) -> Bool { mutate { $0.toggle(b, onSpace: uuid) } }
+    @discardableResult public func pinEverywhere(_ b: String) -> Bool { mutate { $0.pinEverywhere(b) } }
+    @discardableResult public func unpinEverywhere(_ b: String) -> Bool { mutate { $0.unpinEverywhere(b) } }
+    @discardableResult public func toggleEverywhere(_ b: String) -> Bool { mutate { $0.toggleEverywhere(b) } }
+    @discardableResult public func toggleEverywhereException(_ b: String, onSpace uuid: String) -> Bool { mutate { $0.toggleEverywhereException(b, onSpace: uuid) } }
+    public func order(onSpace uuid: String) -> [String] { view { $0.order(onSpace: uuid) } }
+    @discardableResult public func setOrder(_ keys: [String], onSpace uuid: String) -> Bool { mutate { $0.setOrder(keys, onSpace: uuid) } }
+    @discardableResult public func reorderVisible(_ keys: [String], onSpace uuid: String) -> Bool { mutate { $0.reorderVisible(keys, onSpace: uuid) } }
+    @discardableResult public func pinAndReorder(_ b: String, onSpace uuid: String, visibleOrder: [String]) -> Bool {
+        mutate { $0.pin(b, onSpace: uuid); $0.reorderVisible(visibleOrder, onSpace: uuid) }
+    }
     public static var defaultURL: URL { PowerspacesPaths.pinsFile }
 
-    private static func read(_ url: URL) -> PinModel? { JSONFileStore.read(PinModel.self, from: url) }
-
-    // A dropped save means pins won't survive a restart, so JSONFileStore logs the failure.
-    private func save() { JSONFileStore.writeEncodable(model, to: url) }
+    private func read() throws -> PinModel {
+        guard FileManager.default.fileExists(atPath: url.path) else { return PinModel() }
+        return try JSONDecoder().decode(PinModel.self, from: Data(contentsOf: url))
+    }
+    private func mutate(_ action: (inout PinModel) -> Void) -> Bool {
+        mutex.lock(); defer { mutex.unlock() }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Lock a stable sidecar, never the atomically replaced JSON inode.
+            let fd = Darwin.open(url.path + ".lock", O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard fd >= 0 else { throw POSIXError(.EACCES) }
+            defer { Darwin.close(fd) }
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+            while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+                guard errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR else { throw POSIXError(.EIO) }
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw POSIXError(.EWOULDBLOCK) }
+                usleep(5_000)
+            }
+            defer { _ = flock(fd, LOCK_UN) }
+            var fresh = try read() // Invalid/unreadable data must not be overwritten.
+            action(&fresh)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(fresh).write(to: url, options: .atomic)
+            model = fresh
+            return true
+        } catch {
+            Log.error("PinStore: transaction failed: \(error.localizedDescription)")
+            return false
+        }
+    }
 }

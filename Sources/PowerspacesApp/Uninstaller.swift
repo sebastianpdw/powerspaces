@@ -102,6 +102,10 @@ enum Uninstaller {
     /// confirmed — it does not prompt on its own. `keepPreferences` leaves the settings
     /// JSONs in place so a reinstall restores them.
     @MainActor static func run(keepPreferences: Bool) {
+        guard AppleDockController.apply(hidden: false, now: true) else {
+            HUD.show("Uninstall paused: the macOS Dock could not be restored. Try again.")
+            return
+        }
         revertSystemState()
 
         let present = targets(keepPreferences: keepPreferences)

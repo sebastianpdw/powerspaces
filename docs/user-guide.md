@@ -37,7 +37,8 @@ The heart of it: **focus-if-here, else open a new window here, and never jump aw
 ## Install
 
 You need Apple's **Command Line Tools** (`xcode-select --install` if `swift
---version` fails). Then, from the repo:
+--version` fails). On macOS 27 building the app needs **Xcode**; see
+[Getting started](getting-started.md). Then, from the repo:
 
 ```sh
 ./scripts/install-app.sh             # builds & installs Powerspaces.app
@@ -98,7 +99,7 @@ desktop's windows. One quick manual step in AltTab makes ⌘-Tab the trigger.
 Flip on **Preferences → Behavior → Faster desktop switch** to make moving between
 desktops *instant*. It skips macOS's slide animation, so multitasking feels much
 snappier. Works with your trackpad swipe and/or keyboard shortcut; needs
-Accessibility.
+Accessibility. Supported on macOS 14 through macOS 27.
 
 ---
 
@@ -126,8 +127,7 @@ None of these are bugs; they're the real macOS constraints the design works with
 - **New windows are app-dependent.** Browsers, editors, Finder, and Safari open a
   fresh window on the current desktop perfectly. Truly single-instance apps
   (Messages, System Settings) can't, so for those you pick how Powerspaces reacts:
-  **show a warning**, **move the window here** (when the app supports it), or **quit
-  it on the other desktop and reopen it here**.
+  **show a warning**, or **quit it on the other desktop and reopen it here**.
 - **It augments Spaces, it doesn't replace them**, so swipe gestures and Mission
   Control stay exactly as they are.
 - **Per-desktop Cmd-Tab uses AltTab**, a separate free app, with one manual step to

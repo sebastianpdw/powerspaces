@@ -33,6 +33,41 @@ enum HUD {
         // messages (e.g. per-app "already open on another desktop" notices) still stack.
         guard !live.contains(where: { $0.message == message }) else { return }
 
+        let panel = makePanel(message, prefs: prefs, icon: icon)
+
+        if let screen = NSScreen.main {
+            let visible = screen.visibleFrame
+            let margin: CGFloat = 24
+            let x = visible.midX - panel.frame.width / 2
+            // Stack multiple banners instead of overlapping them: offset each new
+            // one past those already on screen, away from its anchor edge.
+            let step = panel.frame.height + 10
+            let offset = CGFloat(live.count) * step
+            let y: CGFloat
+            switch prefs.hudPosition {
+            case .top: y = visible.maxY - panel.frame.height - margin - offset
+            case .bottom: y = visible.minY + margin + offset
+            case .center: y = visible.midY - panel.frame.height / 2 - offset
+            }
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+        panel.orderFrontRegardless()
+        live.append(Banner(panel: panel, message: message))
+
+        if let seconds = prefs.warningDurationSeconds {
+            // Self-dismiss after the timed duration. A main-actor `Task` (rather than
+            // a `@Sendable` dispatch block) keeps both the non-Sendable panel capture
+            // and the `dismiss` call cleanly on the main actor.
+            Task { @MainActor [weak panel] in
+                try? await Task.sleep(for: .seconds(seconds))
+                guard let panel else { return }
+                dismiss(panel)
+            }
+        }
+    }
+
+    /// Construct without presenting, so ownership can be verified independently.
+    static func makePanel(_ message: String, prefs: Preferences, icon: NSImage? = nil) -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 72),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
@@ -83,7 +118,10 @@ enum HUD {
             constraints.append(label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18))
         }
         NSLayoutConstraint.activate(constraints)
-        container.onClick = { dismiss(panel) }
+        container.onClick = { [weak panel] in
+            guard let panel else { return }
+            dismiss(panel)
+        }
         panel.contentView = container
 
         // Reduce Transparency: hide the blur and give the banner a solid background,
@@ -96,38 +134,13 @@ enum HUD {
             container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         }
 
-        if let screen = NSScreen.main {
-            let visible = screen.visibleFrame
-            let margin: CGFloat = 24
-            let x = visible.midX - panel.frame.width / 2
-            // Stack multiple banners instead of overlapping them: offset each new
-            // one past those already on screen, away from its anchor edge.
-            let step = panel.frame.height + 10
-            let offset = CGFloat(live.count) * step
-            let y: CGFloat
-            switch prefs.hudPosition {
-            case .top: y = visible.maxY - panel.frame.height - margin - offset
-            case .bottom: y = visible.minY + margin + offset
-            case .center: y = visible.midY - panel.frame.height / 2 - offset
-            }
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        }
-        panel.orderFrontRegardless()
-        live.append(Banner(panel: panel, message: message))
-
-        if let seconds = prefs.warningDurationSeconds {
-            // Self-dismiss after the timed duration. A main-actor `Task` (rather than
-            // a `@Sendable` dispatch block) keeps both the non-Sendable panel capture
-            // and the `dismiss` call cleanly on the main actor.
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(seconds))
-                dismiss(panel)
-            }
-        }
+        return panel
     }
 
     private static func dismiss(_ panel: NSPanel) {
         guard live.contains(where: { $0.panel === panel }) else { return } // already gone
+        (panel.contentView as? HUDContainer)?.onClick = nil
+        panel.contentView = nil
         panel.orderOut(nil)
         live.removeAll { $0.panel === panel }
     }

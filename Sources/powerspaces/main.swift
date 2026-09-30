@@ -98,12 +98,14 @@ case "pin", "unpin":
     do {
         let uuid = try CGSSpaceProvider().currentSpaceUUID()
         let store = loadPinStore()
+        let saved: Bool
         switch (command, all) {
-        case ("pin", true): store.pinEverywhere(bundleID)
-        case ("pin", false): store.pin(bundleID, onSpace: uuid)
-        case ("unpin", true): store.unpinEverywhere(bundleID)
-        default: store.unpin(bundleID, onSpace: uuid)
+        case ("pin", true): saved = store.pinEverywhere(bundleID)
+        case ("pin", false): saved = store.pin(bundleID, onSpace: uuid)
+        case ("unpin", true): saved = store.unpinEverywhere(bundleID)
+        default: saved = store.unpin(bundleID, onSpace: uuid)
         }
+        guard saved else { fail("Could not save the pin change; check pins.json or retry after another writer finishes.") }
         let scope = all ? "all desktops" : "this desktop (\(uuid))"
         print("\(command)ned \(bundleID) on \(scope) — pinned here now: \(store.isPinned(bundleID, onSpace: uuid))")
     } catch { fail("\(error)") }

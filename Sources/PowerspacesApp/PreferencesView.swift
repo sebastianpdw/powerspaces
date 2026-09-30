@@ -203,7 +203,7 @@ struct PreferencesView: View {
         .init(name: "Open App Launcher shortcut", tab: 4, keywords: "hotkey keyboard"),
         .init(name: "Middle-click action", tab: 4, keywords: "click mouse"),
         .init(name: "Force new window modifier", tab: 4, keywords: "shift option"),
-        .init(name: "Quit on last window close", tab: 4, keywords: "close to quit experimental"),
+        .init(name: "Quit after closing its last window from this dock", tab: 4, keywords: "close to quit experimental"),
         .init(name: "Refresh interval", tab: 4, keywords: "poll performance"),
         .init(name: "Faster desktop switch", tab: 4, keywords: "swipe instant space"),
         .init(name: "Warning banners", tab: 4, keywords: "hud notify"),
@@ -633,18 +633,15 @@ struct PreferencesView: View {
                 }
             }
             Section {
-                Toggle("Quit an app when its last window closes", isOn: bind(\.quitOnLastWindowClose))
-                    .help("Close-to-quit: closing an app's last window quits that app instead "
-                          + "of leaving it running with no windows. Stops background copies from "
-                          + "piling up when you summon an app to many desktops (e.g. Claude). "
-                          + "Experimental: it overrides an app's own behavior and can discard "
-                          + "unsaved work, so it's off by default.")
+                Toggle("Quit after closing its last window from this dock", isOn: bind(\.quitOnLastWindowClose))
+                    .help("After a successful Close from Powerspaces, waits five seconds and politely "
+                          + "quits only if both window inventories confirm there are no windows. "
+                          + "Native window-close gestures and filtered disappearance never trigger this.")
             } header: {
                 Text("Closing windows (experimental)")
             } footer: {
-                Text("When on, closing the last window of an app quits it, so it leaves ⌘-Tab "
-                     + "and frees memory instead of lingering invisibly. Acts per app instance; "
-                     + "minimizing never quits.")
+                Text("Applies only to windows closed through Powerspaces. Incomplete window data, "
+                     + "minimizing, Mission Control and a process restart prevent automatic quit.")
             }
             if advanced {
                 Section("Performance") {
@@ -656,10 +653,10 @@ struct PreferencesView: View {
             }
             Section {
                 Toggle("Swipe (four-finger)", isOn: bind(\.fasterDesktopSwitch))
-                    .help("Replace the trackpad swipe between desktops with an instant jump, where "
-                          + "the slide animation is skipped. Keeps your normal swipe; needs Accessibility.")
+                    .help("Make the trackpad desktop swipe faster. Keeps your normal swipe; needs Accessibility. "
+                          + "macOS 27 may retain a short animation to keep desktop rendering stable.")
                 Toggle("Keyboard shortcut", isOn: bind(\.fasterKeyboardSwitch))
-                    .help("Also make your “Move left/right a space” keyboard shortcut instant. "
+                    .help("Also make your “Move left/right a space” keyboard shortcut faster. "
                           + "Takes over whatever you've bound it to (e.g. ⌘⌥←/→) by temporarily "
                           + "disabling the system shortcut while Powerspaces runs; it's restored "
                           + "when you turn this off or quit. Needs Accessibility.")
@@ -667,7 +664,11 @@ struct PreferencesView: View {
                 Text("Faster desktop switch")
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Switch desktops instantly, with no slide animation. Needs Accessibility.")
+                    Text("Switch desktops faster. Needs Accessibility.")
+                    if ProcessInfo.processInfo.operatingSystemVersion.majorVersion == 27 {
+                        Text("macOS 27 may show a short slide animation to keep desktop rendering stable.")
+                            .foregroundStyle(.secondary)
+                    }
                     Text("Changed your “Move left/right a space” shortcut? Restart Powerspaces to pick it up.")
                         .foregroundStyle(.secondary)
                     Link("Based on InstantSpaceSwitcher ↗",
@@ -1224,26 +1225,52 @@ private struct RaycastSetupRow: View {
 /// the "I enabled it but it still says missing" case that frequent rebuilds cause.
 private struct AccessibilityResetRow: View {
     @State private var trusted = AccessibilityPermission.isTrusted
+    @State private var postAccess = AccessibilityPermission.hasPostEventAccess
 
     var body: some View {
-        HStack {
-            Text("Accessibility")
-            Spacer()
-            Image(systemName: trusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(trusted ? Color.green : Color.orange)
-            Text(trusted ? "Granted" : "Not granted")
-                .foregroundStyle(.secondary)
+        Group {
+            HStack {
+                Text("Accessibility")
+                Spacer()
+                Image(systemName: trusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(trusted ? Color.green : Color.orange)
+                Text(trusted ? "Granted" : "Not granted")
+                    .foregroundStyle(.secondary)
+            }
+            .help("Whether macOS currently lets Powerspaces control windows. Needed to "
+                  + "close or minimize windows, read window titles, and intercept desktop-switch input.")
+            HStack {
+                Text("Desktop switching permission")
+                Spacer()
+                Text(trusted && postAccess ? "Granted" : "Not granted")
+                    .foregroundStyle(.secondary)
+                if !trusted || !postAccess {
+                    Button("Grant Permission…") {
+                        AccessibilityPermission.promptForFastSwitch(userInitiated: true)
+                        refreshPermissionStatus()
+                    }
+                }
+            }
+            .help("Fast switching needs Accessibility and permission to send input events. "
+                  + "Approve the macOS request when enabling the feature.")
+            HStack {
+                Button("Open Settings…") { AccessibilityPermission.openSettings() }
+                    .help("Open System Settings ▸ Privacy & Security ▸ Accessibility.")
+                Spacer()
+                Button("Reset Permission…") { AccessibilityPermission.confirmResetAndRelaunch() }
+                    .help("Clear Powerspaces' Accessibility permission and relaunch, so a stale "
+                          + "grant left by an earlier build can be re-approved.")
+            }
         }
-        .help("Whether macOS currently lets Powerspaces control windows. Needed to "
-              + "close or minimize windows and read window titles.")
-        HStack {
-            Button("Open Settings…") { AccessibilityPermission.openSettings() }
-                .help("Open System Settings ▸ Privacy & Security ▸ Accessibility.")
-            Spacer()
-            Button("Reset Permission…") { AccessibilityPermission.confirmResetAndRelaunch() }
-                .help("Clear Powerspaces' Accessibility permission and relaunch, so a stale "
-                      + "grant left by an earlier build can be re-approved.")
+        .onAppear { refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionStatus()
         }
+    }
+
+    private func refreshPermissionStatus() {
+        trusted = AccessibilityPermission.isTrusted
+        postAccess = AccessibilityPermission.hasPostEventAccess
     }
 }
 

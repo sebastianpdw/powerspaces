@@ -16,6 +16,8 @@ launch/activation leaks in the Dock and launchers.
   configuration, and the Raycast hook, from your shell.
 - [Design principles](design-principles.md): the three rules the app is built to,
   lightweight, minimal, and modular.
+- [Changelog](changelog.md): what changed in each release, including macOS 27
+  support, and what has been verified on which macOS version.
 
 ## The four problems it targets
 

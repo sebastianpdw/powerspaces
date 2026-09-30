@@ -134,6 +134,7 @@ extension DockPanel {
         quit.target = NSApp
         quit.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
         menu.addItem(quit)
+        menu.preserveItemImages()
         return menu
     }
 
@@ -185,6 +186,7 @@ extension DockPanel {
     /// Centering: x shifts left by half the menu width (horizontal bars), or y
     /// shifts up by half the menu height so it brackets the icon (vertical).
     private func popUpMenu(_ menu: NSMenu, from button: NSButton) {
+        menu.preserveItemImages()
         let gap: CGFloat = 6
         let centerX = button.bounds.midX - menu.size.width / 2
         let centerY = button.bounds.midY + menu.size.height / 2

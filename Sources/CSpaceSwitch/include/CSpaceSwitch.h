@@ -6,20 +6,50 @@
 #define POWERSPACES_CSPACESWITCH_H
 
 #include <stdbool.h>
+#include <stdint.h>
+
+typedef enum {
+    PSWSwitchReady, PSWSwitchAccessibility, PSWSwitchUnsupported,
+    PSWSwitchEventFailure, PSWSwitchHotkeyFailure, PSWSwitchTransitionFailure,
+    PSWSwitchPostEventAccess, PSWSwitchTapFailure
+} psw_switch_status;
+psw_switch_status psw_switch_status_current(void);
+bool psw_switch_access_granted(void);
+/// Read-only: Ready, Accessibility, or PostEventAccess. Never prompts.
+psw_switch_status psw_switch_access_status(void);
+void psw_set_switch_failure_handler(void (*handler)(void));
+void psw_check_switch_health(void);
+bool psw_space_hotkeys_need_restore(void);
+bool psw_recover_space_hotkeys(bool legacyRecovery);
+
+/// Pure confirmation policy; notification receipt alone cannot confirm a switch.
+static const double kPSWConfirmationDeadline = 0.75; // seconds from the first posted phase
+typedef enum { PSWTransitionWaiting, PSWTransitionConfirmed, PSWTransitionFailed } psw_transition_action;
+psw_transition_action psw_transition_decision(uint64_t start, uint64_t expected,
+    uint64_t current, bool valid, double elapsed);
+
+/// Pure gesture policy, shared with the dependency-free regression runner.
+typedef struct { bool tracking, bypass, fired; } psw_gesture_state;
+typedef enum {
+    PSWGesturePass, PSWGestureSuppress, PSWGestureLeft, PSWGestureRight
+} psw_gesture_action;
+psw_gesture_action psw_gesture_decision(psw_gesture_state *state, int phase,
+                                       double progress, double velocity, bool nativeActive);
 
 /**
  * @brief Enable or disable "faster desktop switch".
  *
  * When enabled, a session-level CGEvent tap intercepts the real horizontal
- * trackpad space-switch swipe and replaces it with an instant (no slide
- * animation) synthetic switch in the same direction. The user's swipe gesture is
+ * trackpad space-switch swipe and replaces it with an accelerated synthetic
+ * switch in the same direction. macOS 27 may retain a short slide animation.
+ * The user's swipe gesture is
  * unchanged — it just lands immediately.
  *
  * Enabling installs the event tap, which requires the host process to be trusted
- * for Accessibility. Returns true if the requested state was reached, false only
- * if enabling failed (typically because the tap couldn't be created without
- * Accessibility). Disabling always succeeds and removes the tap.
- *
+ * for Accessibility and event posting. Returns true if the requested state was
+ * reached. A false result may mean missing permission, unsupported event format,
+ * or unavailable display state. Disabling stops new interception; the shared tap
+ * remains while keyboard interception or an intercepted gesture still needs it.
  * Call on the main thread (the tap is driven by the main run loop).
  */
 bool psw_set_swipe_override_enabled(bool enabled);
@@ -37,21 +67,13 @@ bool psw_set_swipe_override_enabled(bool enabled);
  * Disabling the native hotkey first is what makes this reliable: the key-down is
  * then an ordinary event the tap can suppress, with no competing animated switch.
  *
- * Returns true if the requested state was reached; false only if enabling failed
- * because the event tap couldn't be created (typically missing Accessibility).
+ * Returns true if the requested state was reached. Disabling may return false if
+ * shortcut restoration failed; its durable recovery journal is kept for retry.
  */
 bool psw_set_keyboard_override_enabled(bool enabled,
                                        unsigned short leftKeyCode,
                                        unsigned long long leftModifiers,
                                        unsigned short rightKeyCode,
                                        unsigned long long rightModifiers);
-
-/**
- * @brief Force-enable the space-switch symbolic hotkeys (IDs 79/80/81/82).
- *
- * Crash recovery: call once on launch if a prior run disabled them for the
- * keyboard override but didn't get to restore them (e.g. it crashed).
- */
-void psw_restore_space_hotkeys(void);
 
 #endif /* POWERSPACES_CSPACESWITCH_H */

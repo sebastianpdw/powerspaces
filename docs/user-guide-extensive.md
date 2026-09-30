@@ -114,8 +114,9 @@ And here's what that feels like in practice, with no more teleporting:
 
 ## Installing Powerspaces
 
-Powerspaces builds from source with the Swift toolchain. You don't need full
-Xcode, since Apple's **Command Line Tools** is enough:
+Powerspaces builds from source with the Swift toolchain. On macOS 26 and earlier
+Apple's **Command Line Tools** are enough. On macOS 27 building the app needs
+**Xcode**; see [Getting started](getting-started.md).
 
 ```sh
 xcode-select --install   # only if `swift --version` fails
@@ -584,13 +585,13 @@ Clicks, close-to-quit, performance, desktop switching, and warning banners.
 
 | Setting | What it does |
 |---|---|
-| **Quit an app when its last window closes** | Close-to-quit: closing an app's *last* window quits the app instead of leaving it running with no windows, so it stops background copies piling up when you summon an app to many desktops (e.g. Claude), leaves ⌘-Tab, and frees memory. Acts per app instance; minimising never quits. **Experimental and off by default**, since it overrides an app's own behaviour and can discard unsaved work. |
+| **Quit after closing its last window from this dock** | Experimental and off by default. After a successful Close through Powerspaces, wait five seconds and politely quit only if both raw window-server and Accessibility inventories confirm the same process has no windows. Native close gestures, missing icons, incomplete reads and Mission Control do not trigger a quit. |
 
 **Performance** *(Advanced)*
 
 | Setting | What it does |
 |---|---|
-| **Refresh interval** | How often the dock re-scans windows. Lower is snappier but uses a touch more CPU (**Immediate 0.1s, the default** / Snappy 1s / Default 2s / Easy 5s, or custom 0.1–10s). |
+| **Refresh interval** | How often the dock re-scans windows. Lower is snappier but uses a touch more CPU (Immediate 0.1s / Snappy 1s / **Default 2s** / Easy 5s, or custom 0.1–10s). |
 
 **Desktop switching**
 
@@ -618,7 +619,9 @@ toggles:
 
 Both are **off by default**, need **Accessibility** (grant it if prompted, then
 relaunch), and use private macOS APIs, so they can occasionally need a tweak
-after a macOS update; just turn them off if anything looks off. The instant-switch
+after a macOS update; just turn them off if anything looks off. macOS 27 was such
+an update: it ignores the swipe events that macOS 14 to 26 accept, so Powerspaces
+sends a different form there and keeps the earlier one for older versions. The instant-switch
 technique is adapted from
 [InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher) (MIT).
 
@@ -689,7 +692,7 @@ you can override any of them.
 
 | Strategy | What it does | Best for |
 |---|---|---|
-| `openArgs` | Runs the app binary with arguments like `--new-window` | Browsers / Electron (Firefox, Chrome, VS Code) |
+| `openArgs` | Launches the app bundle through Launch Services with arguments like `--new-window` | Browsers / Electron (Firefox, Chrome, VS Code) |
 | `newInstance` | `open -n -a` to force a second instance | Genuinely multi-instance apps |
 | `appleScript` | Runs the app's own "make new window" script | Finder, Safari, terminals |
 | `warn` | Shows a small banner; doesn't move or close anything | Single-window apps that can't get a second window (Messages, System Settings, Music, Mail) |
@@ -765,20 +768,25 @@ Powerspaces is upfront about what macOS does and doesn't allow. None of these ar
 bugs; they're the real constraints the design works within:
 
 - **New windows are app-dependent.** Browsers, editors, Finder, and Safari get a
-  fresh window on the current desktop flawlessly. Genuinely single-instance apps
+  request a fresh window on the selected desktop; support depends on the app. Genuinely single-instance apps
   (Messages, System Settings) can't; for those you choose how Powerspaces reacts:
-  **show a warning**, **move the window here** (when the app supports it), or **quit
-  it on the other desktop and reopen it here**.
-- **It can't tell which *other* desktop a window is on.** macOS only reports Space
-  membership for the *current* desktop. This doesn't affect smart-launch ("is it
-  here?" and "is it running anywhere?" both work perfectly); it just rules out a
-  full "all Spaces" map.
+  **show a warning**, or **quit it on the other desktop and reopen it here**.
+- **Smart-launch depends on what the window server reports.** "Is it here?" and
+  "is it open on another desktop?" both come from the Space each window reports.
+  A window that reports no Space at all is treated as a leftover, not as a window.
+- **One icon per real window, and what counts as one.** Accessibility decides: an
+  ordinary window counts, minimized or not. These do not: helper surfaces an app
+  keeps beside its windows (address-bar suggestions, tab previews), a window you
+  closed that the app keeps alive in the background (Slack and most Electron apps
+  do this), and floating panels or inspectors while their app also has an ordinary
+  window. So an app you "closed" but did not quit has no icon on that desktop
+  unless it is pinned; click its pin or use the App Launcher to bring a window
+  back.
 - **The dock polls.** macOS doesn't post notifications for every window
-  open/close, so the dock refreshes on a timer (default 0.1s, the *Immediate*
-  preset) in addition to Space/app events. It's cheap, and you can dial it back
-  to save CPU.
-- **Multi-monitor** edge cases are lightly handled in this version; "current
-  Space" is resolved relative to the display that owns the menu bar.
+  open/close, so the dock refreshes on a timer (default 2s, with idle backoff) in addition to Space/app events. Sampling runs away from the UI thread, and you can tune the interval.
+- **Multi-monitor actions** capture the selected dock's display and desktop. If that
+  context changes before execution, the action is cancelled. Missing membership is
+  treated conservatively; minimized/hidden windows require known Space membership.
 - **Per-desktop Cmd-Tab is delegated to AltTab.** Rather than reimplement the
   macOS app switcher, Powerspaces detects/installs [AltTab](https://alt-tab.app) and
   one-click-sets its active-Space filter; making ⌘-Tab the trigger is a guided
@@ -863,3 +871,21 @@ again.
 
 📚 More docs: [User guide (short)](user-guide.md) · [Getting started](getting-started.md)
 · [CLI reference](cli.md) · [docs index](README.md)
+
+### Stability and recovery behavior
+
+Ordinary Quit never becomes Force Quit. If an app refuses or is still presenting
+a save dialog, resolve it in that app and try again. “Quit there and reopen here”
+waits for actual exit and cancels reopening if quitting has not completed.
+
+Powerspaces stores originals for all four native Dock keys it changes in a
+separate `dock-recovery.json`, including keys that were originally unset. Reset
+Settings preserves this recovery record. Failed restoration keeps it for retry;
+uninstall pauses until Dock restoration succeeds. A crash is recovered on the
+next launch according to the Hide Apple's Dock setting. Legacy releases never
+backed up delay/animation originals, so those exact legacy values cannot be recovered.
+
+A Dock restart waits while a mouse button is held down, so it never interrupts a
+drag. Quit and uninstall do not wait: they restore the Dock at once. Automatic
+wake/display drift no longer restarts Dock; if macOS reveals it, toggle Hide
+Apple's Dock to reapply.

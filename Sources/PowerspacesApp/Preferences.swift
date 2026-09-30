@@ -38,12 +38,12 @@ final class Preferences: ObservableObject {
     /// `config.json`) so they don't depend on the app's bundle identity.
     static var preferencesURL: URL { PowerspacesPaths.preferencesFile }
 
-    private let store = JSONPreferencesStore(url: Preferences.preferencesURL)
+    private let store: JSONPreferencesStore
 
     /// Per-desktop dock color/opacity overrides live in their own file
     /// (`dock-colors.json`), keyed by Space UUID — not the flat preferences store,
     /// which only holds scalar settings. See `DockTintStore`.
-    private let dockTints = DockTintStore(url: PowerspacesPaths.dockColorsFile)
+    private let dockTints: DockTintStore
 
     // MARK: Numeric specs (presets + slider bounds), shared with the UI
 
@@ -211,7 +211,9 @@ final class Preferences: ObservableObject {
         static func custom(_ key: String) -> String { key + "Custom" }
     }
 
-    private init() {
+    init(preferencesURL: URL = Preferences.preferencesURL, dockColorsURL: URL = PowerspacesPaths.dockColorsFile) {
+        store = JSONPreferencesStore(url: preferencesURL)
+        dockTints = DockTintStore(url: dockColorsURL)
         store.register(defaults: [
             // Defaults below mirror the project's chosen default preferences,
             // with one deliberate
@@ -242,7 +244,7 @@ final class Preferences: ObservableObject {
             K.animateOnAdd: true,
             K.iconAnimationStyle: IconAnimationStyle.slideOff.rawValue,
             K.iconAnimationSpeed: Preferences.iconAnimationSpeedSpec.presetValue("Default (0.18s)"),
-            K.pollInterval: Preferences.pollIntervalSpec.presetValue("Immediate (0.1s)"),
+            K.pollInterval: Preferences.pollIntervalSpec.presetValue("Default (2s)"),
             K.warningCustom: 4.0,
             K.barPosition: BarPosition.bottom.rawValue,
             K.fullscreenDockBehavior: FullscreenDockBehavior.autoHide.rawValue,
@@ -383,14 +385,8 @@ final class Preferences: ObservableObject {
     var forceNewModifier: ForceNewModifier { get { raw(K.forceNewModifier, .shiftOrOption) } set { setRaw(newValue, K.forceNewModifier) } }
     /// What a middle-click on a dock icon does (default: open a new window).
     var middleClickAction: MiddleClickAction { get { raw(K.middleClickAction, .newWindow) } set { setRaw(newValue, K.middleClickAction) } }
-    /// **Experimental — off by default.** Close-to-quit: when you close an app's
-    /// *last* window, quit that app instance instead of leaving it running with no
-    /// windows. Stops the background-instance pile-up (summoning an Electron app like
-    /// Claude to many desktops otherwise leaves a fresh copy behind each time).
-    /// Per-instance and debounced by a refresh tick (so a close→reopen swap isn't
-    /// quit mid-flight), and it only acts on regular Dock-showing apps, never on
-    /// Powerspaces. Opt-in because it overrides an app's own "keep running window-less"
-    /// behaviour and could discard unsaved work. Acted on by `AppDelegate.refresh`.
+    /// Opt-in polite quit after a successful dock Close, an elapsed grace period,
+    /// and positive raw-CG plus AX confirmation that the same process has no windows.
     var quitOnLastWindowClose: Bool { get { bln(K.quitOnLastWindowClose) } set { setBln(newValue, K.quitOnLastWindowClose) } }
     var menuGlyph: MenuGlyph { get { raw(K.menuGlyph, .powerWindow) } set { setRaw(newValue, K.menuGlyph) } }
     /// Show the current desktop's number next to the menu-bar glyph. Off by default.
@@ -641,7 +637,7 @@ final class Preferences: ObservableObject {
     /// `.preferencesDidChange` so the live dock re-applies.
     func resetAllToDefaults() {
         objectWillChange.send()
-        store.removeAll()
+        store.removeAll(preserving: [K.appleDockAutohideBackup, K.appleDockTilesizeBackup, K.spaceHotkeysDisabledByUs])
         dockTints.clearAll()
         changed()
     }

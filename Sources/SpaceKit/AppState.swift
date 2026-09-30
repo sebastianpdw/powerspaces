@@ -27,7 +27,7 @@ import Foundation
 ///                  ┌────────────────────┐
 ///                  │ runningWindowless  │   alive, owns no window anywhere
 ///                  └─────────┬──────────┘   (Finder after "Quit all desktops")
-///                 new window │
+///                normal open │
 ///                            ▼
 ///                  ┌────────────────────┐
 ///                  │   windowElsewhere  │   window(s) only on *other* Spaces
@@ -42,16 +42,18 @@ public enum AppState: Equatable, Sendable {
     /// Nothing of this app is alive — a cold launch puts its first window here.
     case notRunning
 
-    /// The process is alive but owns no window anywhere. The canonical case is
-    /// Finder after "Quit (all desktops)": macOS auto-relaunches it window-less, and
-    /// a plain `open -a` spawns no window — so this must route to the new-window
-    /// strategy rather than be mistaken for `.notRunning`.
+    /// The process is alive but owns no real window anywhere. Reopen it through
+    /// the same first-window path as a new launch, without another process or a
+    /// quit. Finder's first-window primitive opens a folder instead of the bundle.
     case runningWindowless
 
     /// Has a window, but only on *other* Spaces — none on the desktop you're on.
     /// This is the core fix for issues 1 & 2: open a fresh window *here* instead of
     /// being yanked to the other desktop.
     case windowElsewhere
+
+    /// A real window exists, but its desktop cannot be established safely.
+    case windowUnknown
 
     /// Has a window on the current desktop. `mode` is how that window is presented;
     /// only the dock-click toggle reads it — the launch decision focuses the window
@@ -99,24 +101,34 @@ extension AppState {
     /// so the click toggled (minimized) it instead of opening a window on that screen.
     public static func classify(
         target: AppTarget, snapshot: SpaceSnapshot, frontmostPID: pid_t? = nil,
-        currentSpace: SpaceID? = nil
+        currentSpace: SpaceID? = nil, display: CGRect? = nil
     ) -> AppState {
         // A window on the current Space wins outright — that's the "here" state.
-        if let here = snapshot.windows(of: target, onSpace: currentSpace ?? snapshot.activeSpaceID).first {
+        let hereWindows = snapshot.windows(of: target).filter { $0.isVisible(onSpace: currentSpace ?? snapshot.activeSpaceID, display: display) }
+        // Prefer a window that is on screen; otherwise the first one here, so an app
+        // whose windows are all minimized or hidden stays restorable.
+        if let here = hereWindows.first(where: { $0.isOnscreen }) ?? hereWindows.first {
             return .windowHere(windowID: here.windowID, pid: here.pid,
                                mode: mode(of: here, frontmostPID: frontmostPID))
         }
         // A *real* window exists, just not here → it's on another Space. We test
-        // `realWindows`, not all windows: a spaceless phantom (empty `spaceIDs`, the
-        // ghost an app like Claude leaves after you ✕ its last window) is on no
-        // desktop, so it must not masquerade as "open on another desktop" — that
-        // mistake routed a windowless instance to `.newInstance` and piled up copies.
+        // `realWindows`, not all windows: an off-screen window on no desktop (empty
+        // `spaceIDs`, what an app like Claude leaves after you ✕ its last window)
+        // must not masquerade as "open on another desktop" — that mistake routed
+        // a windowless instance to `.newInstance` and piled up copies.
+        if snapshot.realWindows(of: target).contains(where: {
+            $0.spaceIDs.isEmpty || !$0.spaceMembershipKnown
+                || (display != nil && $0.isOn(currentSpace ?? snapshot.activeSpaceID)
+                    && ($0.bounds.width <= 0 || $0.bounds.height <= 0))
+        }) {
+            return .windowUnknown
+        }
         if !snapshot.realWindows(of: target).isEmpty {
             return .windowElsewhere
         }
-        // No real window anywhere (none, or only phantoms), but the process is alive
-        // → running window-less: the launch layer reuses this instance rather than
-        // spawning another (see `Launcher.newWindow`'s `.newInstance` case).
+        // No real window anywhere (none, or only leftovers), but the process is alive
+        // → running window-less: the ordinary first-window path reopens this
+        // instance rather than applying an additional-window strategy.
         if snapshot.isRunning(target) {
             return .runningWindowless
         }
@@ -129,7 +141,9 @@ extension AppState {
     private static func mode(of window: WindowInfo, frontmostPID: pid_t?) -> WindowMode {
         if window.isMinimized { return .minimized }
         if window.isHidden { return .hidden }
-        return frontmostPID == window.pid ? .active : .inactive
+        // An app can own the menu bar while its window is still off-screen and
+        // absent from AX. That click must restore/focus, not minimize again.
+        return window.isOnscreen && frontmostPID == window.pid ? .active : .inactive
     }
 
     /// A short, secret-free label for logs (e.g. `windowHere(active)`,
@@ -140,6 +154,7 @@ extension AppState {
         case .notRunning: return "notRunning"
         case .runningWindowless: return "runningWindowless"
         case .windowElsewhere: return "windowElsewhere"
+        case .windowUnknown: return "windowUnknown"
         case let .windowHere(_, _, mode): return "windowHere(\(mode))"
         }
     }

@@ -85,6 +85,7 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
                               action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
         menu.addItem(quit)
+        menu.preserveItemImages()
         return menu
     }
 
@@ -211,5 +212,20 @@ final class StatusItemController: NSObject, NSMenuItemValidation {
             break
         }
         return true
+    }
+}
+
+extension NSMenu {
+    /// Keep our existing menu glyphs visible under macOS 27's new default.
+    /// The compiler gate also keeps builds with pre-27 SDK toolchains working.
+    func preserveItemImages() {
+        #if compiler(>=6.4)
+        if #available(macOS 27, *) {
+            for item in items {
+                if item.image != nil { item.preferredImageVisibility = .visible }
+                item.submenu?.preserveItemImages()
+            }
+        }
+        #endif
     }
 }

@@ -10,6 +10,7 @@ import Foundation
 /// What actually happened when a launch was carried out.
 public enum LaunchOutcome: Sendable {
     case focused
+    case cancelled
     case minimized
     case launched
     case newWindow(StrategyKind)
@@ -34,31 +35,38 @@ public struct Launcher {
     let provider: SpaceProviding
     let config: StrategyConfig
     let warn: (String) -> Void
+    let launchRoute: ApplicationLaunchRoute
 
     public init(provider: SpaceProviding,
-                config: StrategyConfig,
+                config: StrategyConfig, launchRoute: ApplicationLaunchRoute = .commandLine,
                 warn: @escaping (String) -> Void) {
         self.provider = provider
         self.config = config
         self.warn = warn
+        self.launchRoute = launchRoute
     }
 
     @discardableResult
-    public func launch(target: AppTarget, forceNew: Bool) throws -> LaunchOutcome {
-        let snapshot = try provider.snapshot()
+    public func launch(target: AppTarget, forceNew: Bool, context: LaunchContext? = nil) throws -> LaunchOutcome {
+        let snapshot = try provider.snapshot(of: target)
         // Classify the app's state once, log it (so the chosen branch is traceable
         // in Console.app), then map it to a decision — no booleans re-derived here.
-        let state = AppState.classify(target: target, snapshot: snapshot)
+        let context = resolvedContext(context, snapshot: snapshot)
+        guard context.isCurrent(snapshot: snapshot, displays: provider.displays()), !NativeInteraction.isActive else {
+            return warned(target, "the desktop changed or the mouse button was held down — try again.")
+        }
+        let state = AppState.classify(target: target, snapshot: snapshot,
+                                      currentSpace: context.spaceID, display: context.displayBounds)
         Log.debug("launch \(target.bundleID ?? target.name ?? "?") — state \(state.label) forceNew=\(forceNew)")
         let decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
         switch decision {
+        case .warnUnknown: return warned(target, "window desktop membership is unavailable — left its windows unchanged.")
         case let .focusWindow(windowID, pid):
-            raise(windowID: windowID, pid: pid)
-            return .focused
+            return focusWindow(windowID: windowID, pid: pid, target: target, snapshot: snapshot, context: context)
         case .launchApp:
-            return coldLaunch(target)
+            return openFirstWindow(target, context: context)
         case let .newWindow(kind):
-            return newWindow(target, kind: kind, snapshot: snapshot)
+            return newWindow(target, kind: kind, snapshot: snapshot, context: context)
         }
     }
 
@@ -68,36 +76,20 @@ public struct Launcher {
     /// a multi-display setup — see `placeNewWindowHere`.
     @discardableResult
     public func dockClick(target: AppTarget, forceNew: Bool,
-                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil) throws -> LaunchOutcome {
-        let snapshot = try provider.snapshot()
-        // Classify once with the live frontmost app folded in, so the logged state
-        // carries the window mode (active / inactive / minimized / hidden) the
-        // toggle turns on. `frontmostPID` is reused below instead of read twice.
-        // `dockSpace` (the clicked dock's display's visible desktop) is what counts as
-        // "here" — so clicking a second screen's dock judges the app against that
-        // screen's desktop, not the menu bar's (otherwise it minimized instead of
-        // opening a window there).
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let state = AppState.classify(target: target, snapshot: snapshot, frontmostPID: frontmostPID,
-                                      currentSpace: dockSpace)
-        Log.debug("dock-click \(target.bundleID ?? target.name ?? "?") — state \(state.label) forceNew=\(forceNew)")
-        let decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
-        let isFrontmost: Bool = {
-            guard case let .focusWindow(_, pid) = decision else { return false }
-            return frontmostPID == pid
-        }()
-        // A minimized window must always restore on click, never re-minimize.
-        // Read the live AX state for the targeted window (apps like Finder stay
-        // frontmost while their last window is minimized, so isFrontmost alone
-        // can't tell us). Needs Accessibility; falls back to false otherwise.
-        let isMinimized: Bool = {
-            guard case let .focusWindow(windowID, pid) = decision,
-                  WindowAX.isTrusted,
-                  let axWindow = WindowAX.axWindow(windowID: windowID, pid: pid) else { return false }
-            return WindowAX.isMinimized(axWindow)
-        }()
-        let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFrontmost, isMinimized: isMinimized)
-        return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
+                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil,
+                          context: LaunchContext? = nil) throws -> LaunchOutcome {
+        let snapshot = try provider.snapshot(of: target)
+        let context = resolvedContext(context, snapshot: snapshot,
+                                      preferredDisplay: preferredDisplay, dockSpace: dockSpace)
+        guard context.isCurrent(snapshot: snapshot, displays: provider.displays()), !NativeInteraction.isActive else {
+            return warned(target, "the desktop changed or the mouse button was held down — try again.")
+        }
+        let state = AppState.classify(target: target, snapshot: snapshot,
+                                      frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                                      currentSpace: context.spaceID, display: context.displayBounds)
+        let action = LaunchEngine.dockClick(state: state, config: config, target: target, forceNew: forceNew)
+        Log.notice("Dock action: app=\(target.bundleID ?? "unknown") state=\(state.label) action=\(action) space=\(context.spaceID) forceNew=\(forceNew)")
+        return perform(action, target: target, newWindowSnapshot: snapshot, context: context)
     }
 
     /// Dock-icon click on *one specific window* — the "Windows" feature shows an
@@ -109,27 +101,26 @@ public struct Launcher {
     @discardableResult
     public func dockClickWindow(windowID: CGWindowID, pid: pid_t,
                                 target: AppTarget, forceNew: Bool,
-                                preferredDisplay: CGRect? = nil) throws -> LaunchOutcome {
-        if forceNew {
-            let snapshot = try provider.snapshot()
-            return newWindow(target, kind: config.strategy(for: target.bundleID),
-                             snapshot: snapshot, preferredDisplay: preferredDisplay)
+                                preferredDisplay: CGRect? = nil, context: LaunchContext? = nil) throws -> LaunchOutcome {
+        let snapshot = try provider.snapshot(of: target)
+        let context = resolvedContext(context, snapshot: snapshot, preferredDisplay: preferredDisplay)
+        guard context.isCurrent(snapshot: snapshot, displays: provider.displays()), !NativeInteraction.isActive else {
+            return warned(target, "the desktop changed or the mouse button was held down — try again.")
         }
-        // Read this window's live AX state once (needs Accessibility; without it
-        // both default false, so the click just raises/activates).
-        let axWindow = WindowAX.isTrusted ? WindowAX.axWindow(windowID: windowID, pid: pid) : nil
-        let isMinimized = axWindow.map(WindowAX.isMinimized) ?? false
-        let appIsFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-        // Treat as "frontmost" for the toggle only when this is the focused app's
-        // main window — so clicking a behind window's icon raises it rather than
-        // minimizing the app's front window.
-        let isFront = appIsFront && (axWindow.map(WindowAX.isMain) ?? false)
-        let decision = LaunchDecision.focusWindow(windowID: windowID, pid: pid)
-        let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFront, isMinimized: isMinimized)
-        // The new-window snapshot is only fetched if that branch is actually taken
-        // (autoclosure), so the common raise/minimize toggle stays a single AX read.
-        return try perform(action, target: target, newWindowSnapshot: try provider.snapshot(),
-                           preferredDisplay: preferredDisplay)
+        guard let window = snapshot.windows(of: target).first(where: { $0.windowID == windowID && $0.pid == pid }),
+              window.isVisible(onSpace: context.spaceID, display: context.displayBounds) else {
+            return warned(target, "that window is no longer on the requested desktop.")
+        }
+        let ax = WindowAX.isTrusted ? WindowAX.axWindow(windowID: windowID, pid: pid) : nil
+        let mode: AppState.WindowMode
+        if window.isMinimized || ax.map(WindowAX.isMinimized) == true { mode = .minimized }
+        else if window.isHidden { mode = .hidden }
+        else if window.isOnscreen && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && ax.map(WindowAX.isMain) == true { mode = .active }
+        else { mode = .inactive }
+        let action = LaunchEngine.dockClick(state: .windowHere(windowID: windowID, pid: pid, mode: mode),
+                                           config: config, target: target, forceNew: forceNew)
+        Log.notice("Dock window action: app=\(target.bundleID ?? "unknown") pid=\(pid) window=\(windowID) mode=\(mode) action=\(action) space=\(context.spaceID)")
+        return perform(action, target: target, newWindowSnapshot: snapshot, context: context)
     }
 
     /// Carries out a `DockClickAction` (shared by `dockClick` and `dockClickWindow`).
@@ -137,19 +128,20 @@ public struct Launcher {
     /// `.newWindow` branch runs.
     private func perform(_ action: DockClickAction, target: AppTarget,
                          newWindowSnapshot: @autoclosure () throws -> SpaceSnapshot,
-                         preferredDisplay: CGRect? = nil) rethrows -> LaunchOutcome {
+                         context: LaunchContext) rethrows -> LaunchOutcome {
         switch action {
+        case .warnUnknown: return warned(target, "window desktop membership is unavailable — left its windows unchanged.")
         case let .raise(windowID, pid):
-            raise(windowID: windowID, pid: pid)
-            return .focused
+            return focusWindow(windowID: windowID, pid: pid, target: target,
+                               snapshot: try newWindowSnapshot(), context: context)
         case let .minimize(windowID, pid):
-            minimize(windowID: windowID, pid: pid)
-            return .minimized
+            return minimize(windowID: windowID, pid: pid, context: context) ? .minimized
+                : warned(target, "could not minimize that window. Check Accessibility permission.")
         case .launch:
-            return coldLaunch(target, preferredDisplay: preferredDisplay)
+            return openFirstWindow(target, context: context)
         case let .newWindow(kind):
             return newWindow(target, kind: kind, snapshot: try newWindowSnapshot(),
-                             preferredDisplay: preferredDisplay)
+                             context: context)
         }
     }
 
@@ -158,15 +150,21 @@ public struct Launcher {
     /// screen's visible desktop instead of the active Space — so "Quit (this
     /// desktop)" on a dock acts on the desktop that dock is showing.
     @discardableResult
-    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil) throws -> LaunchOutcome {
+    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil,
+                                      dockSpace: SpaceID? = nil, context: LaunchContext? = nil) throws -> LaunchOutcome {
         guard WindowAX.isTrusted else {
             return warned(target, "needs Accessibility (granted to the powerspaces app) to close its windows here.")
         }
-        let snapshot = try provider.snapshot()
-        let here = snapshot.windows(of: target).filter { window in
-            if let display { return window.isOnVisibleSpace && window.isOnDisplay(display) }
-            return window.isOn(snapshot.activeSpaceID)
+        let snapshot = try provider.snapshot(of: target)
+        let context = resolvedContext(context, snapshot: snapshot, preferredDisplay: display, dockSpace: dockSpace)
+        guard context.isCurrent(snapshot: snapshot, displays: provider.displays()), !NativeInteraction.isActive else {
+            return warned(target, "the desktop changed or the mouse button was held down — no windows closed.")
         }
+        let candidates = snapshot.windows(of: target)
+        guard !candidates.contains(where: { $0.isReal && $0.spaceIDs.isEmpty }) else {
+            return warned(target, "window desktop membership is unavailable — no windows closed.")
+        }
+        let here = candidates.filter { $0.canClose(onSpace: context.spaceID, display: context.displayBounds) }
         var closed = 0
         for window in here {
             if let axWindow = WindowAX.axWindow(windowID: window.windowID, pid: window.pid),
@@ -179,9 +177,15 @@ public struct Launcher {
     /// Needs Accessibility; warns when it isn't granted or the window has no
     /// close button (so nothing fails silently).
     @discardableResult
-    public func closeWindow(windowID: CGWindowID, pid: pid_t, target: AppTarget) -> LaunchOutcome {
+    public func closeWindow(windowID: CGWindowID, pid: pid_t, target: AppTarget, context: LaunchContext? = nil) -> LaunchOutcome {
         guard WindowAX.isTrusted else {
             return warned(target, "needs Accessibility (granted to the powerspaces app) to close its windows.")
+        }
+        if let context {
+            guard let snapshot = try? provider.snapshot(of: target), contextIsCurrent(context, snapshot: snapshot), !NativeInteraction.isActive,
+                  snapshot.windows(of: target).contains(where: { $0.windowID == windowID && $0.pid == pid && $0.canClose(onSpace: context.spaceID, display: context.displayBounds) }) else {
+                return warned(target, "that window is no longer safely identified on the requested desktop.")
+            }
         }
         guard let axWindow = WindowAX.axWindow(windowID: windowID, pid: pid),
               WindowAX.close(axWindow) else {
@@ -190,58 +194,14 @@ public struct Launcher {
         return .closed(1)
     }
 
-    /// Quit the app entirely — every instance on every desktop (issue 2). Sends each
-    /// instance the polite `terminate()` first, then, after a short grace period,
-    /// force-quits any survivor that *isn't* asking the user about unsaved work.
-    ///
-    /// The polite pass alone isn't enough: a backgrounded app can sit on the quit for
-    /// ~10 s before honoring it (WhatsApp, App-Nap-throttled, keeps its windows up the
-    /// whole time — measured), and lock-less Electron apps (Claude) leave idle
-    /// window-less background copies that ignore a polite quit outright. So after the
-    /// grace we force the stragglers, which is what makes "Quit (all desktops)" feel
-    /// immediate.
-    ///
-    /// The one thing we never force-kill is an app showing a **blocking dialog** — the
-    /// "Save changes before quitting?" sheet/alert it raises in response to the quit.
-    /// We leave it open and warn the user (so unsaved work is theirs to resolve, not
-    /// silently lost). Without Accessibility we can't read dialogs, so we fall back to
-    /// the safe subset: force only window-less survivors, never a windowed app.
-    ///
-    /// Runs off the main thread (the launcher queue), so the brief wait can't freeze
-    /// the UI.
+    /// Normal Quit is always polite. A timeout/refusal is not permission to kill.
     @discardableResult
     public func quitApp(target: AppTarget) -> LaunchOutcome {
         let instances = runningInstances(of: target)
         guard !instances.isEmpty else { return .quit(false) }
-        for app in instances { app.terminate() }
-        // terminate() is async and a background instance can ignore it; give them a
-        // moment to exit (≈1.5 s) before forcing the stragglers.
-        pollUntil(timeout: 1.5, interval: 50_000) {
-            runningInstances(of: target).allSatisfy { $0.isTerminated }
-        }
-        let survivors = runningInstances(of: target).filter { !$0.isTerminated }
-        guard !survivors.isEmpty else { return .quit(true) }
-
-        // No Accessibility → can't tell a save prompt from a normal window, so don't
-        // risk an app's unsaved work: force only the window-less ghosts, as before.
-        guard WindowAX.isTrusted else {
-            let windowlessPids = windowlessInstancePids(of: target, among: survivors)
-            for app in survivors where windowlessPids.contains(app.processIdentifier) { app.forceTerminate() }
-            return .quit(true)
-        }
-
-        var sparedForUnsavedWork = false
-        for app in survivors {
-            if WindowAX.isShowingBlockingDialog(pid: app.processIdentifier) {
-                sparedForUnsavedWork = true
-                continue
-            }
-            app.forceTerminate()
-        }
-        if sparedForUnsavedWork {
-            return warned(target, "has unsaved changes — left it open so you can save first.")
-        }
-        return .quit(true)
+        Log.notice("Quit requested: app=\(target.bundleID ?? "unknown") reason=explicit-quit pids=\(instances.map(\.processIdentifier))")
+        let exited = QuitCoordinator.requestQuit(instances)
+        return exited ? .quit(true) : warned(target, "has not finished quitting — save or dismiss its dialogs and try again.")
     }
 
     /// Every running instance of the target — all processes sharing its bundle id (so
@@ -255,17 +215,53 @@ public struct Launcher {
         return NSWorkspace.shared.runningApplications.filter { $0.localizedName == name }
     }
 
-    /// The pids of `instances` that currently have no real window anywhere — the idle
-    /// duplicates safe to force-quit. Reads one live snapshot; on failure returns an
-    /// empty set, so nothing is force-quit and only the polite terminate applies.
-    private func windowlessInstancePids(of target: AppTarget,
-                                        among instances: [NSRunningApplication]) -> Set<pid_t> {
-        guard let snapshot = try? provider.snapshot() else { return [] }
-        let pidsWithWindows = Set(snapshot.windows(of: target).map(\.pid))
-        return Set(instances.map(\.processIdentifier)).subtracting(pidsWithWindows)
+    /// Keep the original guards, but retain the reason instead of merging every
+    /// cancellation into a permission-like warning with no diagnostic record.
+    public func rejectionReason(for ticket: ActionTicket) -> ActionTicket.Rejection? {
+        let started = ProcessInfo.processInfo.systemUptime
+        func rejected(_ reason: ActionTicket.Rejection, snapshot: SpaceSnapshot? = nil,
+                      displays: [DisplaySpaceInfo] = [], native: String? = nil) -> ActionTicket.Rejection {
+            let now = ProcessInfo.processInfo.systemUptime
+            let current = displays.first { $0.displayUUID == ticket.context.displayUUID }?.currentSpaceID
+            Log.error("Dock action cancelled: reason=\(reason.rawValue) requestedSpace=\(ticket.context.spaceID) display=\(ticket.context.displayUUID?.prefix(8) ?? "unspecified") currentDisplaySpace=\(current.map(String.init) ?? "unavailable") activeSpace=\(snapshot.map { String($0.activeSpaceID) } ?? "unavailable") timeRemaining=\(ticket.deadline - now) validationElapsed=\(now - started) native=\(native ?? "none")")
+            return reason
+        }
+        guard ticket.hasNotExpired(at: started) else { return rejected(.expired) }
+        // A ticket only asks whether its desktop is still showing. A window inventory
+        // here made every click wait for a full scan before its action took another.
+        let displays = provider.displays()
+        guard let active = (displays.first(where: \.isActive) ?? displays.first)?.currentSpaceID else {
+            return rejected(.snapshotUnavailable)
+        }
+        let snapshot = SpaceSnapshot(activeSpaceID: active, windows: [])
+        let mouseDown = NativeInteraction.isActive
+        if let reason = ticket.rejectionReason(snapshot: snapshot, displays: displays,
+                                              now: ProcessInfo.processInfo.systemUptime,
+                                              nativeInteraction: mouseDown) {
+            return rejected(reason, snapshot: snapshot, displays: displays, native: mouseDown ? "left-mouse-down" : nil)
+        }
+        return nil
+    }
+    public func contextIsCurrent(_ context: LaunchContext, snapshot: SpaceSnapshot) -> Bool {
+        context.isCurrent(snapshot: snapshot, displays: provider.displays())
+    }
+
+    func resolvedContext(_ context: LaunchContext?, snapshot: SpaceSnapshot,
+                         preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil) -> LaunchContext {
+        if let context { return context }
+        let displays = provider.displays()
+        if let bounds = preferredDisplay, let info = displays.first(where: { $0.bounds == bounds }) {
+            return LaunchContext(spaceID: dockSpace ?? info.currentSpaceID, spaceUUID: info.currentSpaceUUID,
+                                 displayUUID: info.displayUUID, displayBounds: bounds)
+        }
+        if preferredDisplay == nil, dockSpace == nil, let active = displays.first(where: { $0.isActive }) {
+            return LaunchContext(display: active)
+        }
+        return LaunchContext(spaceID: dockSpace ?? snapshot.activeSpaceID, displayBounds: preferredDisplay)
     }
 
     func warned(_ target: AppTarget, _ tail: String) -> LaunchOutcome {
+        Log.error("App action warning: app=\(target.bundleID ?? "unknown") reason=\(tail)")
         let message = "\(displayName(for: target)) \(tail)"
         warn(message)
         return .warned(message)

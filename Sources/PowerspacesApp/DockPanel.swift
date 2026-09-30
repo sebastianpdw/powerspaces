@@ -24,10 +24,10 @@ final class DockPanel: NSPanel {
     /// An .app was dropped onto the bar: pin `bundleID` to this desktop and save
     /// `order` — the full left-to-right arrangement with the new app already
     /// placed in the slot the user opened for it.
-    var onDropApp: ((_ bundleID: String, _ order: [String]) -> Void)?
+    var onDropApp: ((_ bundleID: String, _ order: [String], _ spaceUUID: String?) -> Void)?
     /// Reports the new left-to-right arrangement (a list of `orderKey`s) after
     /// the user finishes dragging an icon, so it can be persisted.
-    var onReorder: (([String]) -> Void)?
+    var onReorder: (([String], String?) -> Void)?
     /// Right-click → "When open elsewhere": flip an app between warn and move-here.
     var onSetStrategy: ((DockApp, StrategyKind) -> Void)?
     /// Supplies an app's current new-window strategy so the submenu can tick it.
@@ -97,6 +97,7 @@ final class DockPanel: NSPanel {
     /// so the buttons aren't torn out from under the drag. (Internal, not private,
     /// so the auto-hide extension's `hide()` can defer while a drag is in flight.)
     var isReordering = false
+    private var dragSpaceUUID: String?
     /// True while an external .app is being dragged over the bar (a slot is
     /// open). Like `isReordering`, this freezes the poll's rebuilds so the open
     /// slot survives until the drop or cancel.
@@ -110,6 +111,7 @@ final class DockPanel: NSPanel {
     /// freezes the poll's rebuilds so the animating icons aren't torn out from
     /// under the animation. (Internal for the auto-hide extension's `hide()`.)
     var isAnimating = false
+    private var animationGeneration = 0
     /// The freshest app list requested while an animation was running, applied
     /// once it finishes so changes that arrived mid-animation aren't lost.
     private var pendingApps: [DockApp]?
@@ -497,9 +499,20 @@ final class DockPanel: NSPanel {
         // Don't rebuild out from under an in-progress drag (reorder or drag-in) —
         // we'll pick up the saved order on the refresh that follows the drop.
         guard !isReordering, !isExternalDragging else { return }
-        // An animation is mid-flight: remember the latest target and apply it on
-        // completion rather than rebuilding the bar out from under it.
-        if isAnimating { pendingApps = apps; return }
+        if isAnimating {
+            if animateChanges { pendingApps = apps; return }
+            // A desktop switch takes precedence over the previous desktop's
+            // icon animation. Its delayed completions must not restore old apps.
+            animationGeneration += 1
+            isAnimating = false
+            pendingApps = nil
+            animationCrossPad = 0
+            for view in [container, stack, effect, tintOverlay] as [NSView] {
+                view.layer?.removeAllAnimations()
+            }
+            rebuild(apps: apps)
+            return
+        }
         // The 2s poll calls this constantly. Rebuilding the buttons every time
         // tears down the one under the cursor mid-hover, restarting its magnify
         // animation. Only rebuild when the contents actually changed.
@@ -609,7 +622,10 @@ final class DockPanel: NSPanel {
             button.onActivate = { [weak self] app, forceNew in
                 if app.isLauncher { self?.onOpenLauncher?() } else { self?.onSelect?(app, forceNew) }
             }
-            button.onRightClick = { [weak self] in self?.showMenu(for: app, from: button) }
+            button.onRightClick = { [weak self, weak button] in
+                guard let button else { return }
+                self?.showMenu(for: app, from: button)
+            }
             button.onMiddleClick = { [weak self] in self?.handleMiddleClick(app) }
             button.onBeginDrag = { [weak self] in self?.beginReorder($0) }
             button.onDragMove = { [weak self] in self?.updateReorder($0, at: $1) }
@@ -649,20 +665,9 @@ final class DockPanel: NSPanel {
 
     // MARK: - Join / leave animation
 
-    /// A per-icon identity for the join/leave diff: an app's `orderKey` plus which
-    /// of its windows the icon stands for (`#0` for the first / only one). Per-window
-    /// copies (the "Windows" feature) share an `orderKey`, so the trailing ordinal is
-    /// what distinguishes "a second window just opened" (one icon joins) from "the
-    /// app just launched" (the whole app arrives). The `#0` icon keeps a stable key
-    /// across a window-count change, so the original icon *morphs into* it rather
-    /// than vanishing and reappearing when a second window opens.
+    /// Exact PID/window identity keeps a surviving icon stable across count changes.
     private func slotKeys(of apps: [DockApp]) -> [String] {
-        var seen: [String: Int] = [:]
-        return apps.map { app in
-            let n = seen[app.orderKey, default: 0]
-            seen[app.orderKey] = n + 1
-            return "\(app.orderKey)#\(n)"
-        }
+        apps.map(\.slotIdentity)
     }
 
     /// The live buttons whose icon has no counterpart in `newApps` — its app left
@@ -670,12 +675,12 @@ final class DockPanel: NSPanel {
     /// copies went away because a window closed. Keyed on `slotKey`, so a window
     /// closing animates just the icon that left instead of rebuilding silently.
     private func removedButtons(forNewApps newApps: [DockApp]) -> [DockButton] {
-        let surviving = Set(slotKeys(of: newApps))
+        let leaving = DockModel.slotChanges(from: apps, to: newApps).leaving
         return stack.arrangedSubviews
             .compactMap { $0 as? DockButton }
             .filter { button in
                 guard let key = button.slotKey else { return false }
-                return !surviving.contains(key)
+                return leaving.contains(key)
             }
     }
 
@@ -683,8 +688,7 @@ final class DockPanel: NSPanel {
     /// but not currently shown. A whole app arriving brings all its icons; an app
     /// opening a second window brings just the one new per-window copy.
     private func enteringKeys(forNewApps newApps: [DockApp]) -> Set<String> {
-        let current = Set(slotKeys(of: apps))
-        return Set(slotKeys(of: newApps)).subtracting(current)
+        DockModel.slotChanges(from: apps, to: newApps).entering
     }
 
     /// Each icon's width for `apps`, keyed by `slotKey`: a labeled pill is wider
@@ -715,6 +719,8 @@ final class DockPanel: NSPanel {
     /// (`isAnimating`) so it can't rebuild mid-animation.
     private func animateRemoval(of buttons: [DockButton], then apps: [DockApp]) {
         isAnimating = true
+        animationGeneration += 1
+        let generation = animationGeneration
         let prefs = Preferences.shared
         let duration = prefs.iconAnimationSpeed
         let style = prefs.iconAnimationStyle
@@ -771,7 +777,7 @@ final class DockPanel: NSPanel {
                 self.sizeWindowToStack()
             }, completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self else { return }
+                    guard let self, self.animationGeneration == generation else { return }
                     self.isAnimating = false
                     let target = self.pendingApps ?? apps
                     self.pendingApps = nil
@@ -803,7 +809,7 @@ final class DockPanel: NSPanel {
         }, completionHandler: { [weak self] in
             // Animation completion fires on the main actor.
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.animationGeneration == generation else { return }
                 // Beat 2: drop them from the layout so the neighbors slide together and
                 // the bar shrinks to fit — all animated. Closing the pad here lets the
                 // window shrink back to its snug size in the same motion.
@@ -819,7 +825,7 @@ final class DockPanel: NSPanel {
                     self.sizeWindowToStack()
                 }, completionHandler: { [weak self] in
                     MainActor.assumeIsolated {
-                        guard let self else { return }
+                        guard let self, self.animationGeneration == generation else { return }
                         self.isAnimating = false
                         // Rebuild to the freshest target so anything that changed during
                         // the animation lands. For a plain quit this matches what's already
@@ -840,6 +846,8 @@ final class DockPanel: NSPanel {
     /// frozen throughout (`isAnimating`).
     private func animateAddition(of buttons: [DockButton], morphing morphs: [(button: DockButton, from: CGFloat)] = []) {
         isAnimating = true
+        animationGeneration += 1
+        let generation = animationGeneration
         let prefs = Preferences.shared
         let duration = prefs.iconAnimationSpeed
         let style = prefs.iconAnimationStyle
@@ -883,7 +891,7 @@ final class DockPanel: NSPanel {
         }, completionHandler: { [weak self] in
             // Animation completion fires on the main actor.
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.animationGeneration == generation else { return }
                 self.layoutIfNeeded() // settle the now-open slots so bounds are full-size
                 // Beat 2: the icons appear in place (now that their slots are open).
                 buttons.forEach { $0.prepareToAppear(style: style, slideOff: slide) }
@@ -894,7 +902,7 @@ final class DockPanel: NSPanel {
                     buttons.forEach { $0.playAppear() }
                 }, completionHandler: { [weak self] in
                     MainActor.assumeIsolated {
-                        guard let self else { return }
+                        guard let self, self.animationGeneration == generation else { return }
                         self.isAnimating = false
                         // Close the transparent room back to the snug fit (the bar doesn't
                         // move, so this is invisible).
@@ -930,20 +938,32 @@ final class DockPanel: NSPanel {
 
     private func beginReorder(_ button: DockButton) {
         isReordering = true
+        dragSpaceUUID = spaceUUID
         button.setLifted(true)
     }
 
     /// Slides the dragged icon to the slot the cursor is over, shifting the
     /// others aside. Driven live as the pointer moves.
     private func updateReorder(_ button: DockButton, at locationInWindow: NSPoint) {
-        guard let current = stack.arrangedSubviews.firstIndex(of: button) else { return }
-        let target = slotIndex(forCursorAt: locationInWindow, ignoring: button)
-        guard target != current else { return }
+        let buttons = stack.arrangedSubviews.compactMap { $0 as? DockButton }
+        guard let key = button.app?.orderKey else { return }
+        let group = buttons.filter { $0.app?.orderKey == key }
+        guard !group.isEmpty else { return }
+        let others = buttons.filter { !group.contains($0) }
+        let cursor = stack.convert(locationInWindow, from: nil)
+        let vertical = Preferences.shared.barPosition.isVertical
+        let insertion = others.prefix { vertical ? cursor.y < $0.frame.midY : cursor.x > $0.frame.midX }.count
+        let reorderedApps = DockModel.reorderingGroup(buttons.compactMap(\.app),
+                                                       key: key, insertion: insertion)
+        let byIdentity = Dictionary(buttons.compactMap { view in view.app.map { ($0.slotIdentity, view) } },
+                                    uniquingKeysWith: { first, _ in first })
+        let reordered = reorderedApps.compactMap { byIdentity[$0.slotIdentity] }
+        guard reordered != buttons else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.16
             ctx.allowsImplicitAnimation = true
-            stack.removeArrangedSubview(button)
-            stack.insertArrangedSubview(button, at: target)
+            buttons.forEach { stack.removeArrangedSubview($0) }
+            reordered.enumerated().forEach { stack.insertArrangedSubview($0.element, at: $0.offset) }
             layoutIfNeeded()
         }
     }
@@ -956,7 +976,8 @@ final class DockPanel: NSPanel {
         // With the "Windows" feature on, an app can occupy several adjacent
         // buttons; collapse them to one key per app (first occurrence wins) so
         // the saved arrangement stays one entry per app.
-        onReorder?(reordered.map(\.orderKey).uniqued())
+        onReorder?(reordered.map(\.orderKey).uniqued(), dragSpaceUUID)
+        dragSpaceUUID = nil
     }
 
     // MARK: - Drag-in (an .app dragged onto the bar)
@@ -969,6 +990,7 @@ final class DockPanel: NSPanel {
     /// the first time, then slides that slot between icons as the cursor moves so
     /// the dragged app always has a place to land.
     private func updateDragSlot(at locationInWindow: NSPoint) {
+        if !isExternalDragging { dragSpaceUUID = spaceUUID }
         isExternalDragging = true
         let target = slotIndex(forCursorAt: locationInWindow, ignoring: dragGap)
         if dragGap == nil { openDragGap(at: target); return }
@@ -1047,7 +1069,8 @@ final class DockPanel: NSPanel {
         // The drag already opened the slot; don't replay the join animation on the
         // refresh this triggers.
         suppressAddAnimationOnce = true
-        onDropApp?(bundleID, keys)
+        onDropApp?(bundleID, keys, dragSpaceUUID)
+        dragSpaceUUID = nil
     }
 
     /// The stack slot the cursor is over: the number of icons sitting ahead of it
@@ -1060,10 +1083,14 @@ final class DockPanel: NSPanel {
         let vertical = Preferences.shared.barPosition.isVertical
         let cursor = stack.convert(locationInWindow, from: nil)
         var index = 0
-        for view in stack.arrangedSubviews where view !== excluded {
+        let views = stack.arrangedSubviews.filter { $0 !== excluded }
+        for view in views {
             let ahead = vertical ? (cursor.y < view.frame.midY) : (cursor.x > view.frame.midX)
             if ahead { index += 1 } else { break }
         }
+        while index > 0, index < views.count,
+              let before = (views[index - 1] as? DockButton)?.app?.orderKey,
+              let after = (views[index] as? DockButton)?.app?.orderKey, before == after { index += 1 }
         return index
     }
 
@@ -1164,7 +1191,8 @@ final class DockPanel: NSPanel {
     /// excludes the menu bar and the macOS Dock.) Internal so the auto-hide
     /// extension can compute the on-edge spot the bar slides away from.
     func origin(forSize size: NSSize, on screen: NSScreen) -> NSPoint {
-        let visible = screen.visibleFrame
+        let visible = Self.usableFrame(visible: screen.visibleFrame, full: screen.frame,
+                                       appleDockHidden: Preferences.shared.hideAppleDock)
         let gap = CGFloat(Preferences.shared.edgeGap)
         // The bar hugs the window's OUTER edge (`applyBarFrame`) with all hover
         // headroom on the inner side, so we anchor the window's outer edge at the
@@ -1183,6 +1211,14 @@ final class DockPanel: NSPanel {
         case .right:
             return NSPoint(x: visible.maxX - size.width - gap, y: visible.midY - size.height / 2)
         }
+    }
+
+    /// The area a bar may use. While Powerspaces hides the macOS Dock, macOS keeps
+    /// reserving the Dock's edge in `visibleFrame` and posts no change when the Dock
+    /// turns to auto-hide, so only the menu bar (the top of `visibleFrame`) counts.
+    static func usableFrame(visible: CGRect, full: CGRect, appleDockHidden: Bool) -> CGRect {
+        guard appleDockHidden else { return visible }
+        return CGRect(x: full.minX, y: full.minY, width: full.width, height: visible.maxY - full.minY)
     }
 
     // MARK: - Auto-hide state

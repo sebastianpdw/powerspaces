@@ -40,13 +40,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Consecutive poll ticks that found nothing changed. Drives the gentle
     /// backoff in `scheduleNextPoll`; reset to 0 on any change or workspace event.
     private var pollIdleTicks = 0
-    /// The last display list we pushed to each dock (keyed by display UUID), so a
-    /// poll tick can tell whether the window world actually changed (the dock
-    /// dedupes internally but doesn't report back, and skips updates mid-drag).
-    private var lastDisplayByDisplay: [String: [DockApp]] = [:]
-    /// The last visible-Space UUID seen per display, so a Space switch on that
-    /// display suppresses the per-icon join/leave animation (the whole bar swaps).
-    private var lastSpaceByDisplay: [String: String] = [:]
+    /// The last validated list per display and desktop: what a returning desktop
+    /// shows at once, how a poll tick tells whether the window world changed, and
+    /// when a Space switch suppresses the per-icon animation (the whole bar swaps).
+    private var memo = DockMemo()
     /// The displays (with their visible Space) from the last refresh, so click/pin
     /// handlers can resolve a dock's desktop UUID and screen bounds.
     private var displaySpaces: [DisplaySpaceInfo] = []
@@ -74,12 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is pending and stops itself once everything wanted is installed — see
     /// `startAccessibilityWatchIfNeeded`.
     private var accessibilityWatchTimer: Timer?
-    /// Close-to-quit bookkeeping (experimental `quitOnLastWindowClose`): the pids
-    /// that had ≥1 window on the previous refresh, and the pids that just went
-    /// window-less and are awaiting a one-tick confirmation before being quit.
-    /// See `reapWindowlessInstances`.
-    private var pidsWithWindowsLastRefresh: Set<pid_t> = []
-    private var reapPendingPids: Set<pid_t> = []
+    /// Bounded pending work; app-launch requests coalesce until they finish.
+    private var pendingActions: Set<String> = []
+    private var launcherContext: LaunchContext?
+    private lazy var dockRefresh = makeDockRefreshCoordinator()
+    /// The last validated scan: the inventory with its titles and active window.
+    private var latestSample: DockRefreshSample?
     /// Apps we've already told the user are effectively single-window — their
     /// "open a new window" attempt flashed a window on this desktop that the app
     /// then reaped (Claude does this since v1.1617.0 dropped multi-window). Warned
@@ -95,49 +92,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let launcherQueue = DispatchQueue(label: "nl.sebastianpdw.powerspaces.launcher", qos: .userInitiated)
 
     private func makeLauncher() -> Launcher {
-        Launcher(provider: provider, config: config,
+        Launcher(provider: provider, config: config, launchRoute: .workspace,
                  warn: { message in DispatchQueue.main.async { MainActor.assumeIsolated { HUD.show(message) } } })
     }
 
-    /// Run a (possibly blocking) launcher action off the main thread, then refresh
-    /// the dock back on main. `Launcher` is a value type captured by copy here on
-    /// the main thread, so a concurrent `makeLauncher()` reassignment can't race it.
-    private func runLauncher(_ action: @escaping (Launcher) -> Void) {
-        // `Launcher` is a value type copied here on the main actor; the serial queue
-        // runs one action at a time and the UI refresh hops back to main. The copy is
-        // safe to hand across the one queue hop, but neither `Launcher` nor the action
-        // closure is `Sendable`, so wrap them in a transfer box for the crossing rather
-        // than pushing `Sendable` through all of SpaceKit.
+    private func currentContext(for displayUUID: String? = nil) -> LaunchContext? {
+        let display = displayUUID.flatMap { id in displaySpaces.first { $0.displayUUID == id } }
+            ?? (displayUUID == nil ? displaySpaces.first { $0.isActive } : nil)
+        return display.map(LaunchContext.init(display:))
+    }
+
+    /// A bounded serial executor. Repeated launches of the same app coalesce;
+    /// every queued request validates its original desktop before side effects.
+    private func runLauncher(context: LaunchContext? = nil, key: String = UUID().uuidString,
+                             _ action: @escaping (Launcher) -> Void) {
+        guard pendingActions.count < 8 else { HUD.show("Please wait for the pending dock actions to finish."); return }
+        guard !pendingActions.contains(key), let context = context ?? currentContext() else { return }
+        pendingActions.insert(key)
+        let clicked = ProcessInfo.processInfo.systemUptime
+        let ticket = ActionTicket(context: context, createdAt: clicked)
         let launcher = UnsafeTransfer(self.launcher)
         let action = UnsafeTransfer(action)
         launcherQueue.async { [weak self] in
-            action.value(launcher.value)
-            Task { @MainActor in self?.refresh() }
+            let began = ProcessInfo.processInfo.systemUptime
+            let rejection = launcher.value.rejectionReason(for: ticket)
+            if rejection == nil {
+                action.value(launcher.value)
+            }
+            let ended = ProcessInfo.processInfo.systemUptime
+            Log.notice("Dock action timing: waitedMs=\(Int((began - clicked) * 1000)) ranMs=\(Int((ended - began) * 1000)) rejected=\(rejection?.rawValue ?? "no")")
+            Task { @MainActor in
+                guard let self else { return }
+                self.pendingActions.remove(key)
+                if let rejection {
+                    switch rejection {
+                    case .expired:
+                        HUD.show("Dock action expired while waiting. Try clicking again.")
+                    case .snapshotUnavailable:
+                        HUD.show("Dock action cancelled because the window list was unavailable. Try again.")
+                    case .desktopChanged:
+                        HUD.show("Dock action cancelled because this dock's desktop changed. Try again.")
+                    case .nativeInteraction:
+                        HUD.show("Dock action cancelled while the mouse button was held down. Try again.")
+                    }
+                }
+                self.refresh()
+            }
         }
     }
 
-    /// Like `runLauncher`, but for the smart-launch paths that can open a *new
-    /// window*. After the launch, if a window-making strategy reported success,
-    /// verify a little later that the window actually stuck: a single-window app
-    /// (Claude since v1.1617.0 removed multi-window) flashes a fresh window on the
-    /// current desktop, then hands off to its existing instance and closes that
-    /// window — leaving the process running but window-less. We can't make such an
-    /// app keep a second window, so when we detect it we warn the user and point
-    /// them at a strategy that does work (see `verifyNewWindowLanded`).
-    private func runLaunch(target: AppTarget, _ action: @escaping (Launcher) -> LaunchOutcome?) {
-        // The Space we're launching onto, read on the main actor before the hop. The
-        // check below compares against *this* Space (not whichever is active later),
-        // so it stays correct even if the user switches desktops during the wait.
-        // (`currentSpaceID` isn't on the `SpaceProviding` seam; the snapshot carries it.)
-        let launchSpace = (try? provider.snapshot())?.activeSpaceID
-        let launcher = UnsafeTransfer(self.launcher)
-        let action = UnsafeTransfer(action)
-        launcherQueue.async { [weak self] in
-            let outcome = action.value(launcher.value)
+    private func runLaunch(target: AppTarget, context: LaunchContext? = nil,
+                           _ action: @escaping (Launcher) -> LaunchOutcome?) {
+        guard let context = context ?? currentContext() else { return }
+        let key = "launch:" + (target.bundleID ?? target.name ?? "?")
+        runLauncher(context: context, key: key) { [weak self] launcher in
+            let outcome = action(launcher)
             Task { @MainActor in
-                guard let self else { return }
-                self.refresh()
-                self.verifyNewWindowLanded(outcome: outcome, target: target, launchSpace: launchSpace)
+                self?.verifyNewWindowLanded(outcome: outcome, target: target, launchSpace: context.spaceID)
             }
         }
     }
@@ -160,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The reap happens ~8 s after launch (measured); wait past that.
             try? await Task.sleep(nanoseconds: 12_000_000_000)
             guard let self,
-                  let snapshot = try? self.provider.snapshot(),
+                  let snapshot = self.latestSample?.snapshot,
                   snapshot.isRunning(target),
                   snapshot.windows(of: target, onSpace: launchSpace).isEmpty,
                   // Hand-off to an existing instance leaves a real window on another
@@ -239,17 +250,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (we restore the Dock on quit, so each launch must re-apply). If it's off,
         // leave the system Dock untouched — we never call apply(hidden:) here.
         appliedHideAppleDock = Preferences.shared.hideAppleDock
-        if appliedHideAppleDock { AppleDockController.apply(hidden: true) }
+        AppleDockController.apply(hidden: appliedHideAppleDock)
         // Reconcile the "launch at login" preference with the real OS registration.
         // Runs before the preferences observer is added below, so the adopt-branch
         // write can't trigger a re-apply cascade.
         applyLoginItem()
-        // Crash recovery: if a prior run disabled the system space-switch hotkeys
-        // for the keyboard override but didn't restore them, force them back on
-        // before we (maybe) re-apply the current state.
-        if Preferences.shared.spaceHotkeysDisabledByUs && !Preferences.shared.fasterKeyboardSwitch {
-            FasterDesktopSwitch.restoreSpaceHotkeys()
+        // Recover before reading/adopting shortcut bindings, even when the
+        // keyboard override is still wanted after a crash.
+        FasterDesktopSwitch.installFailureHandler()
+        if FasterDesktopSwitch.restoreSpaceHotkeys(
+            legacyRecovery: Preferences.shared.spaceHotkeysDisabledByUs) {
             Preferences.shared.spaceHotkeysDisabledByUs = false
+        } else {
+            HUD.show(FasterDesktopSwitch.unavailableMessage, force: true)
         }
         applyFasterDesktopSwitch()  // install the swipe-override tap if it's on
         applyFasterKeyboardSwitch() // take over the keyboard shortcut if it's on
@@ -259,8 +272,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startAccessibilityWatchIfNeeded()
         statusItemController.sync()
         setupObservers()
+        launcherPanel.onPresent = { [weak self] screen in
+            self?.launcherContext = self?.currentContext(for: screen?.displayUUID)
+        }
         launcherPanel.onLaunch = { [weak self] app, forceNew in
-            self?.runLaunch(target: app.target) { try? $0.dockClick(target: app.target, forceNew: forceNew) }
+            guard let self, let context = self.launcherContext else { return }
+            self.runLaunch(target: app.target, context: context) {
+                try? $0.dockClick(target: app.target, forceNew: forceNew, context: context)
+            }
         }
         applyLauncherHotkey() // register the global launcher shortcut if one is set
         InstalledAppsStore.shared.reload() // pre-warm the app list so the launcher opens instantly
@@ -282,6 +301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Per-display docks
 
+    private func pinsChanged(_ succeeded: Bool) {
+        if !succeeded { HUD.show("Could not save the dock change. Check the pins file or retry after another settings operation finishes.") }
+        memo.forget()
+        refresh()
+    }
+
     /// Wire a freshly created dock's callbacks. `displayUUID` ties the panel to its
     /// display so pins, the dock-color editor, and (on a multi-display setup) the
     /// screen a new window opens on all target *this* dock's desktop rather than
@@ -293,61 +318,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // act on; a normal icon routes through the smart-launch decision. The
             // dock's own display is the preferred screen for a new window, and its
             // visible desktop is what the click judges "here" against.
-            let bounds = self.bounds(forDisplay: displayUUID)
-            let dockSpace = self.currentSpaceID(forDisplay: displayUUID)
-            self.runLaunch(target: app.target) { launcher in
+            guard let context = self.currentContext(for: displayUUID) else { return }
+            self.runLaunch(target: app.target, context: context) { launcher in
                 if let windowID = app.windowID, let pid = app.pid {
                     return try? launcher.dockClickWindow(windowID: windowID, pid: pid,
                                                          target: app.target, forceNew: forceNew,
-                                                         preferredDisplay: bounds)
+                                                         context: context)
                 }
                 return try? launcher.dockClick(target: app.target, forceNew: forceNew,
-                                               preferredDisplay: bounds, dockSpace: dockSpace)
+                                               context: context)
             }
         }
         dock.onPinHere = { [weak self] app in
             guard let self, let uuid = self.spaceUUID(forDisplay: displayUUID),
                   let bundleID = app.bundleID else { return }
-            self.pins.toggle(bundleID, onSpace: uuid)
-            self.refresh()
+            self.pinsChanged(self.pins.toggle(bundleID, onSpace: uuid))
         }
         dock.onPinEverywhere = { [weak self] app in
             guard let self, let bundleID = app.bundleID else { return }
-            self.pins.toggleEverywhere(bundleID)
-            self.refresh()
+            self.pinsChanged(self.pins.toggleEverywhere(bundleID))
         }
         // "Unpin (this desktop)" on an all-desktops pin: hide it here only, leaving
         // it pinned on every other desktop (or show it again if already hidden).
         dock.onToggleHereForEverywhere = { [weak self] app in
             guard let self, let uuid = self.spaceUUID(forDisplay: displayUUID),
                   let bundleID = app.bundleID else { return }
-            self.pins.toggleEverywhereException(bundleID, onSpace: uuid)
-            self.refresh()
+            self.pinsChanged(self.pins.toggleEverywhereException(bundleID, onSpace: uuid))
         }
         dock.onCloseThisDesktop = { [weak self] app in
             guard let self else { return }
-            let bounds = self.bounds(forDisplay: displayUUID)
-            self.runLauncher { _ = try? $0.closeOnCurrentDesktop(target: app.target, onDisplay: bounds) }
+            guard let context = self.currentContext(for: displayUUID) else { return }
+            self.runLauncher(context: context) { [weak self] launcher in
+                if case let .closed(count) = try? launcher.closeOnCurrentDesktop(target: app.target, context: context), count > 0 {
+                    Task { @MainActor in self?.scheduleReap(app) }
+                }
+            }
         }
         dock.onCloseAllDesktops = { [weak self] app in
             self?.runLauncher { $0.quitApp(target: app.target) }
         }
         dock.onCloseWindow = { [weak self] app in
             guard let windowID = app.windowID, let pid = app.pid else { return }
-            self?.runLauncher { _ = $0.closeWindow(windowID: windowID, pid: pid, target: app.target) }
+            guard let self, let context = self.currentContext(for: displayUUID) else { return }
+            self.runLauncher(context: context) { [weak self] launcher in
+                if case .closed(1) = launcher.closeWindow(windowID: windowID, pid: pid, target: app.target, context: context) {
+                    Task { @MainActor in self?.scheduleReap(app) }
+                }
+            }
         }
-        dock.onDropApp = { [weak self] bundleID, order in
-            guard let self, let uuid = self.spaceUUID(forDisplay: displayUUID) else { return }
-            self.pins.pin(bundleID, onSpace: uuid)
-            // Persist the arrangement the user dropped into, so the new app stays
-            // wedged where they placed it instead of jumping to the end.
-            self.pins.setOrder(order, onSpace: uuid)
-            self.refresh()
+        dock.onDropApp = { [weak self] bundleID, order, uuid in
+            guard let self else { return }
+            guard let uuid, uuid == self.spaceUUID(forDisplay: displayUUID) else {
+                HUD.show("Drop cancelled because the dock's desktop changed. Try again."); self.refresh(); return
+            }
+            self.pinsChanged(self.pins.pinAndReorder(bundleID, onSpace: uuid, visibleOrder: order))
         }
-        dock.onReorder = { [weak self] keys in
-            guard let self, let uuid = self.spaceUUID(forDisplay: displayUUID) else { return }
-            self.pins.setOrder(keys, onSpace: uuid)
-            self.refresh()
+        dock.onReorder = { [weak self] keys, uuid in
+            guard let self else { return }
+            guard let uuid, uuid == self.spaceUUID(forDisplay: displayUUID) else {
+                HUD.show("Reorder cancelled because the dock's desktop changed. Try again."); self.refresh(); return
+            }
+            self.pinsChanged(self.pins.reorderVisible(keys, onSpace: uuid))
         }
         dock.currentStrategy = { [weak self] app in
             self?.config.strategy(for: app.bundleID) ?? .newInstance
@@ -388,8 +419,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             docks[uuid]?.orderOut(nil)
             docks[uuid]?.close()
             docks[uuid] = nil
-            lastDisplayByDisplay[uuid] = nil
-            lastSpaceByDisplay[uuid] = nil
         }
         // Bring up docks for newly wanted displays.
         for info in desired where docks[info.displayUUID] == nil {
@@ -416,26 +445,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let value = displaySpaces.first { $0.displayUUID == uuid }?.currentSpaceUUID
         return (value?.isEmpty == false) ? value : nil
     }
-    /// The numeric Space id visible on this display — what a dock click on this
-    /// display treats as "the current desktop" (so it judges the app against this
-    /// screen's desktop, not the menu bar's). nil when unknown (0).
-    private func currentSpaceID(forDisplay uuid: String) -> SpaceID? {
-        let value = displaySpaces.first { $0.displayUUID == uuid }?.currentSpaceID
-        return (value ?? 0) != 0 ? value : nil
-    }
-
-    /// The global bounds of a display (the preferred screen for new windows, and the
-    /// scope for that screen's dock contents). Prefers the live Core Graphics bounds
-    /// of the matching screen — authoritative and always non-zero for an attached
-    /// display — and falls back to what the window server reported last refresh.
-    private func bounds(forDisplay uuid: String) -> CGRect? {
-        if let screen = NSScreen.screens.first(where: { $0.displayUUID == uuid }) {
-            let live = CGDisplayBounds(screen.displayID)
-            if live != .zero { return live }
-        }
-        return displaySpaces.first { $0.displayUUID == uuid }?.bounds
-    }
-
     /// The `NSScreen` for this display, or nil if it isn't currently attached — used
     /// to open the App Launcher on the screen whose dock tile was clicked.
     private func screen(forDisplay uuid: String) -> NSScreen? {
@@ -447,11 +456,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the only window where the Dock stays hidden with us gone is after a crash
     /// (recoverable by toggling the setting or relaunching).
     func applicationWillTerminate(_ notification: Notification) {
-        if appliedHideAppleDock { AppleDockController.apply(hidden: false) }
+        // Unconditional: it restores only what a recovery record says we changed,
+        // which includes a restore that was still waiting when the app quit.
+        AppleDockController.apply(hidden: false, now: true)
         // Remove the event tap and restore the system space-switch hotkeys cleanly.
         FasterDesktopSwitch.setSwipeEnabled(false)
         FasterDesktopSwitch.setKeyboardEnabled(false)
-        Preferences.shared.spaceHotkeysDisabledByUs = false
+        Preferences.shared.spaceHotkeysDisabledByUs = FasterDesktopSwitch.hotkeysNeedRestore
         accessibilityWatchTimer?.invalidate()
         accessibilityWatchTimer = nil
     }
@@ -476,55 +487,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// swipe-override event tap. If enabling fails — almost always missing
     /// Accessibility — warn once via the HUD; the accessibility watch then installs
     /// it the moment permission is granted (see `startAccessibilityWatchIfNeeded`).
-    private func applyFasterDesktopSwitch() {
+    private func applyFasterDesktopSwitch(requestPermission: Bool = false) {
         let want = Preferences.shared.fasterDesktopSwitch
         lastFasterDesktopSwitchPref = want
+        if want && requestPermission { AccessibilityPermission.promptForFastSwitch(userInitiated: true) }
         let ok = FasterDesktopSwitch.setSwipeEnabled(want)
         // Track what's *actually* installed, not what's merely wanted: a failed
         // enable (no Accessibility yet) leaves this false, so the watch re-applies
         // it on grant rather than the toggle looking on while the tap is absent.
         appliedFasterDesktopSwitch = want && ok
-        if want && !ok { warnFasterSwitchNeedsAccessibility() }
+        if want && !ok { warnFasterSwitchUnavailable() }
     }
 
     /// Apply the keyboard "faster desktop switch" preference: take over (or release)
     /// the user's "Move left/right a space" shortcut. Records whether we've disabled
     /// the system hotkeys so a crash can be recovered from on the next launch.
-    private func applyFasterKeyboardSwitch() {
+    private func applyFasterKeyboardSwitch(requestPermission: Bool = false) {
         let want = Preferences.shared.fasterKeyboardSwitch
         lastFasterKeyboardSwitchPref = want
+        if want && requestPermission { AccessibilityPermission.promptForFastSwitch(userInitiated: true) }
         let ok = FasterDesktopSwitch.setKeyboardEnabled(want)
-        Preferences.shared.spaceHotkeysDisabledByUs = want && ok
+        // New engine recovery is durable and stores exact states. The old
+        // boolean is retained solely to migrate runs of older app versions.
+        if ok || FasterDesktopSwitch.hotkeysNeedRestore {
+            Preferences.shared.spaceHotkeysDisabledByUs = false
+        }
         // As with the swipe: only count it applied if the tap actually installed,
         // so a failed (ungranted) enable is retried by the watch.
         appliedFasterKeyboardSwitch = want && ok
-        if want && !ok { warnFasterSwitchNeedsAccessibility() }
+        if want && !ok { warnFasterSwitchUnavailable() }
     }
 
-    private func warnFasterSwitchNeedsAccessibility() {
-        HUD.show("Faster desktop switch needs Accessibility. Grant Powerspaces in "
-                 + "System Settings ▸ Privacy & Security ▸ Accessibility, and it turns "
-                 + "on by itself.",
-                 force: true)
+    private func warnFasterSwitchUnavailable() {
+        HUD.show(FasterDesktopSwitch.unavailableMessage, force: true)
     }
 
     /// A "faster desktop switch" override is turned on in preferences but isn't
-    /// actually installed — i.e. we're waiting on Accessibility. `applied*` tracks
+    /// actually installed because AX or event-posting approval is pending. `applied*` tracks
     /// the real engine state, so a failed enable leaves its flag false.
-    private var fasterSwitchAwaitingAccessibility: Bool {
-        (Preferences.shared.fasterDesktopSwitch && !appliedFasterDesktopSwitch)
-            || (Preferences.shared.fasterKeyboardSwitch && !appliedFasterKeyboardSwitch)
+    private var fasterSwitchAwaitingPermission: Bool {
+        FasterDesktopSwitch.awaitingPermission &&
+            ((Preferences.shared.fasterDesktopSwitch && !appliedFasterDesktopSwitch)
+            || (Preferences.shared.fasterKeyboardSwitch && !appliedFasterKeyboardSwitch))
     }
 
     /// Start (or stop) the accessibility watch to match what's pending. While an
-    /// override is wanted-but-not-installed it polls `AXIsProcessTrusted()` once a
-    /// second and re-applies the pending override the moment macOS trusts us — so a
+    /// override is waiting for permission it checks AX and event-posting access
+    /// once a second and re-applies the pending override after both are approved — so a
     /// freshly reinstalled / permission-reset app turns its overrides on by itself,
     /// instead of showing them "on" while they do nothing until toggled off and on.
     /// Idempotent and self-terminating: it stops once nothing is pending, so there's
     /// no idle timer in the steady state. Mirrors the `pollTimer` scheduling pattern.
     private func startAccessibilityWatchIfNeeded() {
-        guard fasterSwitchAwaitingAccessibility else {
+        guard fasterSwitchAwaitingPermission else {
             accessibilityWatchTimer?.invalidate()
             accessibilityWatchTimer = nil
             return
@@ -538,8 +553,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func accessibilityWatchTick() {
-        // Nothing we can do until macOS trusts us; keep waiting.
-        guard AccessibilityPermission.isTrusted else { return }
+        // An AX grant may precede event-posting approval. Request the latter
+        // once, without repeatedly showing a prompt while this timer waits.
+        AccessibilityPermission.promptForFastSwitch()
+        guard FasterDesktopSwitch.hasAccess else { return }
         if Preferences.shared.fasterDesktopSwitch && !appliedFasterDesktopSwitch {
             applyFasterDesktopSwitch()
         }
@@ -589,16 +606,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Preferences.shared.hideAppleDock != appliedHideAppleDock {
             appliedHideAppleDock = Preferences.shared.hideAppleDock
             AppleDockController.apply(hidden: appliedHideAppleDock)
+            repositionAfterAppleDockRestart()
         }
         // Same "only act when this toggle flipped" guard for the two overrides —
         // compared against the last *preference* value (not the applied engine state)
         // so an override that's on but waiting on Accessibility doesn't re-apply and
         // re-show its warning on every unrelated preference change.
         if Preferences.shared.fasterDesktopSwitch != lastFasterDesktopSwitchPref {
-            applyFasterDesktopSwitch()
+            applyFasterDesktopSwitch(requestPermission: true)
         }
         if Preferences.shared.fasterKeyboardSwitch != lastFasterKeyboardSwitchPref {
-            applyFasterKeyboardSwitch()
+            applyFasterKeyboardSwitch(requestPermission: true)
         }
         // An override may have just been enabled while still ungranted (now pending),
         // or disabled (no longer pending) — start or stop the watch to match.
@@ -607,9 +625,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItemController.sync() // the glyph may have changed — create / remove / restyle the item
         restartPoll() // the interval may have changed
         docks.values.forEach { $0.applyAppearance() }
+        memo.forget() // a setting may have changed what the docks list
         // The "dock screens" setting may have flipped; refresh() reconciles which
         // displays have a dock.
         refresh()
+    }
+
+    /// A shown macOS Dock reaches `visibleFrame` only once the restarted Dock is up,
+    /// after the rebuild that follows the toggle, and its screen-change notification
+    /// does not always arrive. So re-place every dock twice, bounded, to rise above
+    /// it. Hiding needs none of this: `DockPanel.usableFrame` ignores the Dock's edge.
+    private func repositionAfterAppleDockRestart() {
+        Task { @MainActor [weak self] in
+            for (elapsed, wait) in [(1, 1.0), (3, 2.0)] {
+                try? await Task.sleep(for: .seconds(wait))
+                guard let self else { return }
+                for dock in self.docks.values { dock.reposition() }
+                let inset = NSScreen.main.map { Int($0.visibleFrame.minY - $0.frame.minY) } ?? -1
+                Log.notice("Apple Dock: repositioned \(self.docks.count) docks \(elapsed)s after the Dock change, main screen bottom inset=\(inset)")
+            }
+        }
     }
 
     /// The most the poll interval can stretch when nothing is changing — small,
@@ -634,7 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isPollingPaused else { return }
         let base = Preferences.shared.pollInterval
         let factor = min(1.0 + Double(pollIdleTicks) * 0.5, AppDelegate.maxPollBackoff)
-        let interval = base * factor
+        let interval = pollIdleTicks >= 4 ? max(2.0, base * factor) : base * factor
         // One-shot, scheduled in the default run-loop mode (like the old repeating
         // timer) so it never fires under an open context menu or mid-drag and
         // rebuilds the bar out from under the user. It re-arms itself in pollTick.
@@ -651,15 +686,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// One poll: refresh, then grow or reset the backoff based on whether anything
     /// changed, and arm the next tick.
     private func pollTick() {
-        let changed = refresh()
-        pollIdleTicks = changed ? 0 : pollIdleTicks + 1
-        scheduleNextPoll()
+        FasterDesktopSwitch.checkHealth()
+        if FasterDesktopSwitch.awaitingPermission {
+            appliedFasterDesktopSwitch = false
+            appliedFasterKeyboardSwitch = false
+            startAccessibilityWatchIfNeeded()
+        }
+        refresh() // Completion re-arms the timer; slow reads never build a backlog.
     }
 
     private func setupObservers() {
         let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(desktopChanged),
+                       name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         let names: [NSNotification.Name] = [
-            NSWorkspace.activeSpaceDidChangeNotification,
             NSWorkspace.didLaunchApplicationNotification,
             NSWorkspace.didTerminateApplicationNotification,
             NSWorkspace.didActivateApplicationNotification,
@@ -709,7 +749,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reconcile which displays have a dock and refresh their contents.
     @objc private func screensChanged() {
         pollIdleTicks = 0
-        refresh()
+        memo.forget()
+        refresh(desktopChanged: true)
         // refresh() adds/removes docks but leaves survivors where they are, and a
         // pure geometry change doesn't alter their contents (so no rebuild → no
         // reposition). Re-place every surviving dock on its (possibly moved) screen
@@ -717,23 +758,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // display is still coming back has a nil boundScreen and skips safely; the
         // follow-up screen-change event places it once that display returns.
         for dock in docks.values { dock.reposition() }
-        // A display attach/rearrange can let macOS drift the Apple Dock's hidden
-        // state back (auto-hide off, or the tile size reset) — which would make it
-        // reappear full-size during App Exposé / Mission Control. Re-assert our hide.
-        AppleDockController.reassertHiddenIfDrifted()
     }
 
     @objc private func refreshAction() {
-        // A workspace event (space switch / app launch-quit-activate) or a manual
+        // An app launch-quit-activate event or a manual
         // refresh just updated us — drop back to the snappy base poll rate.
         pollIdleTicks = 0
         refresh()
+    }
+
+    @objc private func desktopChanged() {
+        pollIdleTicks = 0
+        refresh(desktopChanged: true)
     }
 
     /// Stop the poll while the screen is asleep / the session is switched away —
     /// there's no dock on screen, so the wake-ups would just drain the battery.
     @objc private func suspendPolling() {
         isPollingPaused = true
+        dockRefresh.suspend()
         pollTimer?.invalidate()
         pollTimer = nil
     }
@@ -744,33 +787,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isPollingPaused else { return }
         isPollingPaused = false
         restartPoll()
-        refresh()
-        // Sleep/wake is a known trigger for macOS drifting the Dock's hidden state
-        // back; re-assert it so a woken Mac doesn't show the Apple Dock full-size.
-        AppleDockController.reassertHiddenIfDrifted()
+        refresh(desktopChanged: true)
     }
 
     /// Rebuild every dock's contents from the live snapshot, one per display.
     /// Reconciles which displays have a dock first (so a plugged-in monitor or a
     /// flipped preference takes effect), then fills each from its display's visible
-    /// Space. Returns whether any dock's display list changed, so the poll can
-    /// decide whether to back off.
-    @discardableResult
-    private func refresh() -> Bool {
-        guard let snapshot = try? provider.snapshot() else { return false }
-        // Pids that own at least one window this tick — the shared basis for both
-        // window-less treatments (reaping idle instances, and the window-less dock
-        // items). Computed once here rather than in each helper.
-        let pidsWithWindows = Set(snapshot.windows.map(\.pid))
-        reapWindowlessInstances(pidsWithWindows: pidsWithWindows)
-        let displays = provider.displays()
-        displaySpaces = displays
-        // The active display's desktop number, for the optional menu-bar readout.
-        statusItemController.updateDesktop(
-            (displays.first(where: { $0.isActive })?.spaceIndex).flatMap { $0 > 0 ? $0 : nil })
-        // Create/remove docks to match the displays that should have one.
-        reconcileDocks(displays: displays)
+    /// Space. Sampling is off-main; overlapping events coalesce into one resample.
+    private func refresh(desktopChanged: Bool = false) {
+        guard !isPollingPaused else { return }
+        pollTimer?.invalidate(); pollTimer = nil
+        dockRefresh.request(options: .init(labels: Preferences.shared.showWindowLabels,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier), desktopChanged: desktopChanged)
+    }
 
+    private func makeDockRefreshCoordinator() -> DockRefreshCoordinator {
+        let provider = UnsafeTransfer(self.provider)
+        let coordinator = DockRefreshCoordinator(readSample: { options in
+            let startDisplays = provider.value.displays()
+            let snapshot = try? provider.value.snapshot()
+            var titles: [CGWindowID: String] = [:]
+            let titleDeadline = ProcessInfo.processInfo.systemUptime + 2
+            let reader = WindowTitleReader(deadline: titleDeadline)
+            if options.labels, let snapshot {
+                for window in snapshot.windows {
+                    guard ProcessInfo.processInfo.systemUptime < titleDeadline else { break }
+                    if let title = reader.title(windowID: window.windowID, pid: window.pid) { titles[window.windowID] = title }
+                }
+            }
+            let active = options.labels && ProcessInfo.processInfo.systemUptime < titleDeadline
+                ? options.frontmostPID.flatMap { reader.mainWindowID(pid: $0) } : nil
+            // Read last: the titles above also depend on the desktop showing.
+            return DockRefreshSample(snapshot: snapshot, startDisplays: startDisplays,
+                                     displays: provider.value.displays(), titles: titles, active: active)
+        }, readDisplays: { provider.value.displays() })
+        coordinator.onSample = { [weak self] result in
+            guard let self, !self.isPollingPaused, let snapshot = result.snapshot, !result.displays.isEmpty else { return }
+            self.latestSample = result
+            let changed = self.applyRefresh(snapshot: snapshot, sample: result)
+            self.pollIdleTicks = changed ? 0 : self.pollIdleTicks + 1
+        }
+        // A desktop change shows each dock's memo at once or, on a first visit, the last
+        // inventory projected onto its desktop; the scan that follows corrects it.
+        coordinator.onDisplays = { [weak self] displays in
+            guard let self else { return }
+            self.displaySpaces = displays
+            _ = self.render(displays) { dock, info in
+                self.memo.recall(info) {
+                    guard let sample = self.latestSample, let snapshot = sample.snapshot else { return nil }
+                    return self.dockLists(snapshot: snapshot.placedWindowsOnly(), sample: sample)(dock, info)
+                }
+            }
+        }
+        coordinator.onIdle = { [weak self] in self?.scheduleNextPoll() }
+        return coordinator
+    }
+
+    private func applyRefresh(snapshot: SpaceSnapshot, sample: DockRefreshSample) -> Bool {
+        _ = pins.reload()
+        displaySpaces = sample.displays
+        let list = dockLists(snapshot: snapshot, sample: sample)
+        // A Space switch swaps the whole bar at once; the memo suppresses the
+        // per-icon join/leave animation for that one rebuild.
+        return render(sample.displays) { dock, info in memo.store(list(dock, info), for: info) }
+    }
+
+    /// How each dock's list is built from an inventory and the titles read with it.
+    /// The scan and the projection (a first visit to a desktop) both list through here.
+    private func dockLists(snapshot: SpaceSnapshot, sample: DockRefreshSample)
+        -> (DockPanel, DisplaySpaceInfo) -> [DockApp] {
+        // Used only for optional windowless dock entries, never for termination.
+        let pidsWithWindows = snapshot.windowOwnerPIDs
         let prefs = Preferences.shared
         // "Show apps with no open windows": running, regular (Dock-showing) apps
         // with no window anywhere in this snapshot — computed from the *full*
@@ -786,18 +873,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let options = DockRefresher.DisplayOptions(
             expandPerWindow: prefs.showIconPerWindow || prefs.showWindowLabels,
             shouldLabel: { prefs.showsWindowLabel(windowCount: $0) })
-        // A fresh per-refresh reader memoizes each app's AX window list, so an app
-        // with several labeled windows is fetched once, not once per window. Shared
-        // across docks — the same window may be labeled on more than one bar.
-        let titleReader = WindowTitleReader()
+        // Titles and active-window identity were sampled off-main once per app.
         // The active/forefront window — the frontmost app's main window — so the
         // wide window-title mode can render that bar's title in bold. It's a single
         // global window, so read it once per refresh and reuse across every dock.
         // Only computed in label mode: otherwise a focus change would flip an item
         // and needlessly rebuild the icon-only bars.
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let activeWindowID: CGWindowID? = (prefs.showWindowLabels ? frontmostPID : nil)
-            .flatMap { titleReader.mainWindowID(pid: $0) }
+        let activeWindowID = prefs.showWindowLabels ? sample.active : nil
 
         // Every attached display's bounds (top-left origin, matching window centers),
         // so the per-display filter can keep a window whose center has transiently
@@ -805,27 +887,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // then, not another one) instead of dropping it — which emptied the bar.
         let allDisplayBounds = NSScreen.screens
             .map { CGDisplayBounds($0.displayID) }.filter { $0 != .zero }
-        var anyChanged = false
-        for (uuid, dock) in docks {
-            guard let info = displays.first(where: { $0.displayUUID == uuid }) else { continue }
+        return { [pins] dock, info in
             // Authoritative live bounds for this dock's screen (the window-server
             // value can be .zero if a UUID didn't resolve; the panel's own display
             // is always valid).
             let displayBounds = CGDisplayBounds(dock.boundDisplayID) != .zero
                 ? CGDisplayBounds(dock.boundDisplayID) : info.bounds
             let spaceUUID = info.currentSpaceUUID.isEmpty ? nil : info.currentSpaceUUID
-            // A Space switch swaps the whole bar at once; suppress the per-icon
-            // join/leave animation for that one rebuild.
-            let spaceChanged = info.currentSpaceUUID != (lastSpaceByDisplay[uuid] ?? "")
-            lastSpaceByDisplay[uuid] = info.currentSpaceUUID
-            // Tell the bar which desktop it's on so it can paint that desktop's
-            // custom dock color (re-tints when this changes — e.g. on a Space switch).
-            dock.spaceUUID = spaceUUID
-            // The desktop's 1-based number, for the glanceable indicator badge.
-            dock.desktopNumber = info.spaceIndex > 0 ? info.spaceIndex : nil
-            // Hide / auto-hide / show the bar on a screen showing a full-screen app,
-            // per the full-screen dock preference (a no-op while the state is unchanged).
-            dock.applyFullscreenState(info.isFullscreen)
             let display = DockRefresher.displayApps(
                 onDisplay: displayBounds,
                 snapshot: displaySnapshot,
@@ -842,56 +910,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 windowlessApps: windowlessApps,
                 options: options,
                 nameForBundleID: AppDelegate.appName(for:),
-                titleForWindow: titleReader.title(windowID:pid:))
+                titleForWindow: { id, _ in sample.titles[id] })
             // Flag the bar standing for the forefront window (matched by the same
             // window id the title attach uses) so the panel can bold it. nil id —
             // labels off, or no main window — leaves every item unflagged.
-            let marked = activeWindowID.map { active in
+            return activeWindowID.map { active in
                 display.map { $0.withActive(($0.windowID ?? $0.windowIDs.first) == active) }
             } ?? display
-            dock.update(apps: marked, animateChanges: !spaceChanged)
-            if marked != lastDisplayByDisplay[uuid] { anyChanged = true }
-            lastDisplayByDisplay[uuid] = marked
+        }
+    }
+
+    /// Put every dock on its display's desktop, then show the list `list` gives for
+    /// it, if any. A desktop change and the scan both render through here.
+    private func render(_ displays: [DisplaySpaceInfo],
+                        list: (DockPanel, DisplaySpaceInfo) -> DockMemo.Render?) -> Bool {
+        // The active display's desktop number, for the optional menu-bar readout.
+        statusItemController.updateDesktop(
+            (displays.first(where: { $0.isActive })?.spaceIndex).flatMap { $0 > 0 ? $0 : nil })
+        // Create/remove docks to match the displays that should have one.
+        reconcileDocks(displays: displays)
+        var anyChanged = false
+        for (uuid, dock) in docks {
+            guard let info = displays.first(where: { $0.displayUUID == uuid }) else { continue }
+            // Tell the bar which desktop it's on so it can paint that desktop's
+            // custom dock color (re-tints when this changes — e.g. on a Space switch).
+            dock.spaceUUID = info.currentSpaceUUID.isEmpty ? nil : info.currentSpaceUUID
+            // The desktop's 1-based number, for the glanceable indicator badge.
+            dock.desktopNumber = info.spaceIndex > 0 ? info.spaceIndex : nil
+            // Hide / auto-hide / show the bar on a screen showing a full-screen app,
+            // per the full-screen dock preference (a no-op while the state is unchanged).
+            dock.applyFullscreenState(info.isFullscreen)
+            guard let render = list(dock, info) else { continue }
+            dock.update(apps: render.apps, animateChanges: render.animate)
+            guard render.changed else { continue }
+            anyChanged = true
+            Log.notice("Dock render: source=\(render.source) display=\(uuid.prefix(8)) space=\(info.currentSpaceID) icons=\(render.apps.count)")
         }
         return anyChanged
     }
 
-    /// Experimental "close releases the app" (`quitOnLastWindowClose`): when an app
-    /// instance's last window closes, quit that process so it doesn't linger
-    /// window-less — the cause of the background-instance pile-up (e.g. an Electron
-    /// app like Claude summoned to many desktops). Per-pid, with a one-tick debounce
-    /// so an app that closes one window only to open another (Finder-style "new
-    /// window" flows) isn't quit mid-swap. Only regular (Dock-showing) apps, never
-    /// Powerspaces itself; pre-existing window-less instances are left alone — only a
-    /// window the user actively closes triggers a reap. No-op (but keeps tracking)
-    /// when the preference is off.
-    private func reapWindowlessInstances(pidsWithWindows: Set<pid_t>) {
-        // Update the "had windows last tick" baseline on the way out, after this
-        // tick's candidates have been computed from the previous value.
-        defer { pidsWithWindowsLastRefresh = pidsWithWindows }
-        guard Preferences.shared.quitOnLastWindowClose else {
-            // Carry no backlog while off, so enabling the setting doesn't immediately
-            // quit apps that were already window-less before it was turned on.
-            reapPendingPids = []
-            return
+    /// Only an explicit, successful close from our own dock can arm the opt-in
+    /// reaper. Filtered disappearance during Mission Control never arms it.
+    private func scheduleReap(_ app: DockApp) {
+        guard Preferences.shared.quitOnLastWindowClose, let pid = app.pid,
+              let running = NSRunningApplication(processIdentifier: pid), let launched = running.launchDate else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, Preferences.shared.quitOnLastWindowClose else { return }
+            self.launcherQueue.async {
+                guard let current = NSRunningApplication(processIdentifier: pid),
+                      current.launchDate == launched, !current.isTerminated,
+                      current.activationPolicy == .regular,
+                      WindowInventory.confirmsNoWindows(pid: pid),
+                      current.launchDate == launched, !current.isTerminated else { return }
+                Log.notice("Quit requested: app=\(current.bundleIdentifier ?? "unknown") pid=\(pid) reason=explicit-close-cleanup")
+                current.terminate() // Always polite; never force-kill.
+            }
         }
-        // A pid that went window-less last tick and is *still* window-less now: quit
-        // it. The one-tick gap is what protects a close-then-reopen from being reaped.
-        for pid in reapPendingPids where !pidsWithWindows.contains(pid) {
-            guard let app = NSRunningApplication(processIdentifier: pid),
-                  Self.isReapableRegularApp(app) else { continue }
-            app.terminate()
-        }
-        // Next round's candidates: apps that had a window last tick and have none now.
-        reapPendingPids = pidsWithWindowsLastRefresh.subtracting(pidsWithWindows)
     }
 
-    /// Running apps that have **no window** this tick (`pidsWithWindows` is the set
-    /// that do) — the dock items the "show apps with no open windows" option injects.
-    /// Limited to regular, non-terminated, Dock-showing apps that aren't us (see
-    /// `isReapableRegularApp`), and keyed off the live pid so a ⌘-hidden app (which
-    /// still owns off-screen windows in the snapshot) is correctly *excluded*. Each
-    /// becomes a running, zero-window `DockApp`; a click opens a fresh window here.
+    /// Running regular apps with no listed windows, for the optional dock entries.
     private static func windowlessApps(pidsWithWindows: Set<pid_t>) -> [DockApp] {
         NSWorkspace.shared.runningApplications.compactMap { app -> DockApp? in
             let pid = app.processIdentifier

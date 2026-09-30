@@ -9,8 +9,10 @@ apply to those portions.
 
 ## InstantSpaceSwitcher
 
-The instant-Space-switch technique and the private `CGEvent` field numbers used
-in `Sources/CSpaceSwitch/CSpaceSwitch.c` are adapted from
+The instant-Space-switch technique in `Sources/CSpaceSwitch/CSpaceSwitch.c` and
+`Sources/CSpaceSwitch/SpaceSwitchPolicy.c`, the private `CGEvent` field numbers in
+`Sources/CSpaceSwitch/EventSerialization.h`, and the macOS 27 IOHID payload layout
+in `Sources/CSpaceSwitch/EventSerialization.c` are adapted from
 [InstantSpaceSwitcher](https://github.com/jurplel/InstantSpaceSwitcher) by
 Benjamin Owad (jurplel), used under the MIT License:
 
@@ -37,3 +39,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+The macOS 27 reference is upstream's `macos-27` branch at `bf32cf9`, with phase
+pacing and gesture-pairing proposals reviewed in upstream PRs #88, #95, and #97.
+Powerspaces maintains this code locally; no upstream binary or package is used.

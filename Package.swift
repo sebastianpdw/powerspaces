@@ -28,7 +28,7 @@ let package = Package(
                 linkerSettings: [.linkedFramework("ApplicationServices")]),
         .executableTarget(name: "powerspaces", dependencies: ["SpaceKit"], swiftSettings: concurrencyWarnings),
         .executableTarget(name: "PowerspacesApp", dependencies: ["SpaceKit", "CSpaceSwitch"], swiftSettings: concurrencyWarnings),
-        .executableTarget(name: "SpaceKitTestRunner", dependencies: ["SpaceKit"], swiftSettings: concurrencyWarnings),
+        .executableTarget(name: "SpaceKitTestRunner", dependencies: ["SpaceKit", "CSpaceSwitch"], swiftSettings: concurrencyWarnings),
     ],
     swiftLanguageModes: [.v5]
 )

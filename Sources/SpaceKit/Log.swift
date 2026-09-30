@@ -12,5 +12,7 @@ public enum Log {
     private static let logger = Logger(subsystem: "nl.sebastianpdw.powerspaces", category: "spacekit")
 
     public static func error(_ message: String) { logger.error("\(message, privacy: .public)") }
+    public static func info(_ message: String) { logger.info("\(message, privacy: .public)") }
+    public static func notice(_ message: String) { logger.notice("\(message, privacy: .public)") }
     public static func debug(_ message: String) { logger.debug("\(message, privacy: .public)") }
 }

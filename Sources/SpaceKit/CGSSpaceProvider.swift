@@ -10,6 +10,14 @@ import Foundation
 /// Live implementation of `SpaceProviding` backed by the window server.
 public final class CGSSpaceProvider: SpaceProviding {
     private let cid = CGSMainConnectionID()
+    private let snapshotLock = NSLock()
+    /// The only decision state kept between scans, guarded by `snapshotLock`: the
+    /// windows Accessibility has confirmed. No desktops, frames or AX objects.
+    private var remembered: Set<WindowFilter.Key> = []
+    /// Real windows per app at the previous scan. Read by the change log only.
+    private var realCounts: [String: Int] = [:]
+    /// When the scan that last committed `remembered` started.
+    private var lastCommitted: TimeInterval = 0
 
     public init() {}
 
@@ -31,20 +39,31 @@ public final class CGSSpaceProvider: SpaceProviding {
         throw SpaceError.noCurrentSpace
     }
 
-    public func snapshot() throws -> SpaceSnapshot {
+    public func snapshot() throws -> SpaceSnapshot { try scan(only: nil) }
+
+    public func snapshot(of target: AppTarget) throws -> SpaceSnapshot { try scan(only: target) }
+
+    /// One scan of the window world, or of one app's part of it: an action concerns
+    /// one app, so it asks LaunchServices and Accessibility about that app alone.
+    private func scan(only target: AppTarget?) throws -> SpaceSnapshot {
+        // The dock sampler and the action queue scan side by side, so a click never
+        // waits for the dock's scan. Only what is remembered is shared: it is read
+        // first and committed last, and the lock is held for neither scan.
+        let started = ProcessInfo.processInfo.systemUptime
+        let known = snapshotLock.withLock { remembered }
         let active = try currentSpaceID()
+        let visible = visibleSpaces().union([active])
         // Enumerate the running-apps list once and reuse it for both the
         // window→bundle resolution and the running-app set (a window-less but
         // alive app — Finder after a quit — must read as "running", not absent).
         var bundleIDByPID: [pid_t: String] = [:]
         var running: Set<String> = []
         // Pids of apps the user has ⌘-hidden: their windows go off-screen without
-        // being minimized, so the phantom filter would otherwise drop them. Tag
-        // them instead so the dock can keep (and optionally show) them.
+        // being minimized. Tag them so the dock can keep (and optionally show) them.
         var hiddenPIDs: Set<pid_t> = []
         // Pids of *regular* (Dock-showing) apps — the only kind a per-Space dock
         // should list, exactly as the macOS Dock itself shows only regular apps.
-        // `listWindows` drops every other owner's windows: system-UI agents put up
+        // `listCandidates` drops every other owner's windows: system-UI agents put up
         // full-size, opaque, layer-0 windows that are indistinguishable from a real
         // window by geometry. The most visible offender is the **Dock** process,
         // which draws Mission Control / App Exposé — its overlay surfaced a transient
@@ -53,19 +72,52 @@ public final class CGSSpaceProvider: SpaceProviding {
         // Panel Service) are the same shape. Powerspaces' own accessory process is
         // covered too (its panels are already non-layer-0, so this is just a backstop).
         var regularPIDs: Set<pid_t> = []
-        for app in NSWorkspace.shared.runningApplications {
-            if app.isHidden { hiddenPIDs.insert(app.processIdentifier) }
-            if app.activationPolicy == .regular { regularPIDs.insert(app.processIdentifier) }
-            guard let bundleID = app.bundleIdentifier else { continue }
-            bundleIDByPID[app.processIdentifier] = bundleID
-            running.insert(bundleID)
+        let apps = target?.bundleID.map(NSRunningApplication.runningApplications(withBundleIdentifier:))
+            ?? NSWorkspace.shared.runningApplications
+        for app in apps {
+            // These properties can each synchronously query LaunchServices.
+            // Fetch the pid once, and window-only metadata only for window owners.
+            let bundleID = app.bundleIdentifier
+            if let bundleID { running.insert(bundleID) }
+            guard app.activationPolicy == .regular else { continue }
+            let pid = app.processIdentifier
+            regularPIDs.insert(pid)
+            bundleIDByPID[pid] = bundleID
+            if app.isHidden { hiddenPIDs.insert(pid) }
         }
-        return SpaceSnapshot(activeSpaceID: active,
-                             windows: listWindows(bundleIDByPID: bundleIDByPID,
-                                                  hiddenPIDs: hiddenPIDs, regularPIDs: regularPIDs,
-                                                  activeSpace: active),
-                             runningBundleIDs: running)
+        // The 2 s Accessibility budget covers the whole scan, window list included.
+        let appsRead = ProcessInfo.processInfo.systemUptime
+        let deadline = appsRead + 2
+        let candidates = try listCandidates(bundleIDByPID: bundleIDByPID, hiddenPIDs: hiddenPIDs, regularPIDs: regularPIDs)
+            .filter { target?.matches($0) ?? true }
+        let windowsRead = ProcessInfo.processInfo.systemUptime
+        var slowest = (app: "none", seconds: 0.0)
+        let judged = judge(candidates, visibleSpaces: visible, remembered: known, deadline: deadline, slowest: &slowest)
+        let ended = ProcessInfo.processInfo.systemUptime
+        if ended - started >= 1 {
+            // Where a slow scan spent its time, and which app answered slowest.
+            let ms = { (seconds: TimeInterval) in Int(seconds * 1000) }
+            Log.notice("Window scan slow: scope=\(target == nil ? "all" : "one") totalMs=\(ms(ended - started)) appsMs=\(ms(appsRead - started)) windowsMs=\(ms(windowsRead - appsRead)) accessibilityMs=\(ms(ended - windowsRead)) candidates=\(candidates.count) slowest=\(slowest.app) slowestMs=\(ms(slowest.seconds))")
+        }
+        // Only a full scan changes what is remembered. One that ran through a desktop
+        // change judged some windows against the wrong desktop: its caller discards
+        // it, and it must not be learned from. Nor may an older scan that finishes
+        // late overwrite a newer one.
+        if target == nil, visibleSpaces().isSubset(of: visible) {
+            snapshotLock.withLock {
+                guard started > lastCommitted else { return }
+                lastCommitted = started
+                remembered = WindowFilter.remembered(after: judged, previously: known)
+                let change = WindowFilter.changeLog(judged, previousCounts: realCounts)
+                realCounts = change.counts
+                if let line = change.line { Log.notice(line) }
+            }
+        }
+        return SpaceSnapshot(activeSpaceID: active, judged: judged, runningBundleIDs: running)
     }
+
+    /// The desktop visible on each display, read from the window server in one call.
+    private func visibleSpaces() -> Set<SpaceID> { Set(displays().map(\.currentSpaceID)) }
 
     /// Every attached display with the Space currently visible on it — the basis
     /// for the per-display dock. Geometry (`bounds`) comes from the display layout;
@@ -74,11 +126,20 @@ public final class CGSSpaceProvider: SpaceProviding {
     public func displays() -> [DisplaySpaceInfo] {
         guard let managed = managedDisplaySpaces() else { return [] }
         let activeUUID = CGSCopyActiveMenuBarDisplayIdentifier(cid)?.takeRetainedValue() as String?
-        return managed.compactMap { display in
+        return Self.displaySpaces(managed: managed, physicalDisplays: DisplayInfo.activeDisplays(), activeUUID: activeUUID)
+    }
+
+    /// Map logical Spaces onto physical screens. A single shared "Main" entry
+    /// supplies the same desktop to every display, not a zero-sized fake screen.
+    public static func displaySpaces(managed: [[String: Any]],
+                                     physicalDisplays: [(uuid: String, bounds: CGRect)],
+                                     activeUUID: String?) -> [DisplaySpaceInfo] {
+        return managed.flatMap { display -> [DisplaySpaceInfo] in
             guard let uuid = display["Display Identifier"] as? String,
-                  let current = display["Current Space"] as? [String: Any] else { return nil }
+                  let current = display["Current Space"] as? [String: Any] else { return [] }
             let spaceID = (current["ManagedSpaceID"] as? NSNumber)?.uint64Value
                 ?? (current["id64"] as? NSNumber)?.uint64Value ?? 0
+            guard spaceID != 0 else { return [] }
             let spaceUUID = (current["uuid"] as? String) ?? ""
             // The 1-based position of the visible Space among this display's Spaces,
             // so the dock can label "Desktop N" the way macOS numbers them. Match by
@@ -115,14 +176,18 @@ public final class CGSSpaceProvider: SpaceProviding {
                 }
                 return (current["type"] as? NSNumber)?.intValue ?? 0
             }()
-            return DisplaySpaceInfo(
-                displayUUID: uuid,
-                bounds: DisplayInfo.bounds(forDisplayUUID: uuid) ?? .zero,
-                currentSpaceID: spaceID,
-                currentSpaceUUID: spaceUUID,
-                isActive: uuid == activeUUID,
-                spaceIndex: spaceIndex,
-                isFullscreen: currentSpaceType == 4)
+            let shared = managed.count == 1 && uuid == "Main"
+            let active = shared && !physicalDisplays.contains(where: { $0.uuid == activeUUID })
+                ? physicalDisplays.first?.uuid : activeUUID
+            return physicalDisplays.compactMap { physical in
+                guard shared || physical.uuid == uuid,
+                      physical.bounds.width > 0, physical.bounds.height > 0,
+                      !physical.bounds.isInfinite, !physical.bounds.isNull else { return nil }
+                return DisplaySpaceInfo(displayUUID: physical.uuid, bounds: physical.bounds,
+                    currentSpaceID: spaceID, currentSpaceUUID: spaceUUID,
+                    isActive: physical.uuid == active, spaceIndex: spaceIndex,
+                    isFullscreen: currentSpaceType == 4)
+            }
         }
     }
 
@@ -155,178 +220,96 @@ public final class CGSSpaceProvider: SpaceProviding {
         return nil
     }
 
-    /// `bundleIDByPID` is the pid→bundle map built once by `snapshot()` (resolved
-    /// from the running-apps list rather than per-window, which added up on every
-    /// poll tick).
-    private func listWindows(bundleIDByPID: [pid_t: String], hiddenPIDs: Set<pid_t>,
-                             regularPIDs: Set<pid_t>, activeSpace: SpaceID) -> [WindowInfo] {
+    /// Every regular app's window-server windows that pass the geometry filter,
+    /// in window-server (front-to-back) order. `bundleIDByPID` is the pid→bundle
+    /// map built once by `snapshot()` (resolved from the running-apps list rather
+    /// than per-window, which added up on every poll tick).
+    private func listCandidates(bundleIDByPID: [pid_t: String], hiddenPIDs: Set<pid_t>,
+                                regularPIDs: Set<pid_t>) throws -> [WindowInfo] {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
+            throw SpaceError.windowListUnavailable
         }
-        var windows: [WindowInfo] = []
-        // Memoize each app's AX window list for the minimized check below, so an
-        // app with several off-screen windows costs at most one IPC fetch.
-        var axWindowsByPID: [pid_t: [AXUIElement]] = [:]
-        for info in raw {
-            // Keep only real, user-facing windows. Layer 0 alone isn't enough:
-            // apps emit transparent overlays and short toolbar/tab/status strips
-            // at the same layer, and counting those makes one Safari/Finder window
-            // read as several (see `WindowFilter`). Filter on layer + alpha + size.
-            let layer = info[kCGWindowLayer as String] as? Int ?? -1
-            let alpha = info[kCGWindowAlpha as String] as? Double ?? 1
+        return raw.compactMap { info in
+            guard let wid = info[kCGWindowNumber as String] as? CGWindowID,
+                  let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  regularPIDs.contains(pid) else { return nil }
+            // Layer 0 alone isn't enough: apps emit transparent overlays and short
+            // toolbar/tab/status strips at the same layer (see `WindowFilter`).
             let bounds = (info[kCGWindowBounds as String] as? NSDictionary)
                 .flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .zero
-            guard WindowFilter.isRealWindow(layer: layer, alpha: alpha,
-                                            width: bounds.width, height: bounds.height),
-                  let wid = info[kCGWindowNumber as String] as? CGWindowID,
-                  let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
-            // Keep only windows owned by a *regular* (Dock-showing) app. System-UI
-            // agents (the Dock drawing Mission Control / App Exposé, WindowManager,
-            // Spotlight) and XPC/helper processes (AutoFill, Open and Save Panel
-            // Service) put up full-size, opaque, layer-0 windows that survive the
-            // geometry filter but are not apps you'd switch to — the macOS Dock
-            // doesn't list them either. The Dock process's Mission Control overlay
-            // is the reported case: a transient extra icon in the bar that vanished
-            // the moment Mission Control closed.
-            guard regularPIDs.contains(pid) else { continue }
-            // Second pass: drop full-size off-screen placeholders that momentarily
-            // claim the *current* Space (default 500×500 / 800×600 windows many apps
-            // spawn) — they'd otherwise inflate this app's window count. A visible
-            // window reports onscreen on the active Space even when stacked behind
-            // others; placeholders never do (see `WindowFilter`).
-            let onscreen = info[kCGWindowIsOnscreen as String] as? Bool ?? false
-            let spaceIDs = spaces(for: wid)
-            let claimsActiveSpace = spaceIDs.contains(activeSpace)
-            // A *minimized* window is off-screen yet a real window in the Dock — keep
-            // it so a minimized-only app still shows in its display's dock, and so the
-            // per-display dock can tell a minimized window apart from one parked on a
-            // hidden Space (both report onscreen=false). Only ask AX for off-screen
-            // windows (the visible path stays AX-free); the per-pid list is memoized.
-            // Untrusted/placeholder windows answer "not minimized".
-            let minimized = !onscreen
-                && isMinimized(windowID: wid, pid: pid, cache: &axWindowsByPID)
-            // A ⌘-hidden app's windows are off-screen but real (like minimized
-            // ones), so they're not phantoms — keep and tag them.
-            let hidden = hiddenPIDs.contains(pid)
-            if WindowFilter.isActiveSpacePhantom(
-                claimsActiveSpace: claimsActiveSpace, isOnscreen: onscreen,
-                isMinimized: minimized, isHidden: hidden) { continue }
-            let owner = info[kCGWindowOwnerName as String] as? String ?? ""
-            windows.append(
-                WindowInfo(
-                    windowID: wid,
-                    pid: pid,
-                    ownerName: owner,
-                    bundleID: bundleIDByPID[pid],
-                    spaceIDs: spaceIDs,
-                    bounds: bounds,
-                    isOnscreen: onscreen,
-                    isMinimized: minimized,
-                    isHidden: hidden
-                )
-            )
-        }
-        return filteringToStandaloneWindows(windows, cache: &axWindowsByPID)
-    }
-
-    /// Drop the windows that aren't real, standalone application windows — a
-    /// blocking dialog (the sheet that slides down in System Settings, a modal alert
-    /// panel) or a non-window accessory that surfaces as its own window-server window
-    /// (Safari's search-suggestions list, an `AXScrollArea`) — so they don't read as
-    /// a second window (and a duplicate dock icon) for their app. These survive the
-    /// size/phantom filters above because they're full-size, opaque, on-screen
-    /// windows; only their AX *kind* gives them away (see
-    /// `WindowFilter.isStandaloneWindow`). A genuine new window (a second Safari
-    /// window) is a standard window and stays.
-    ///
-    /// Scoped to apps with **two or more** candidate windows — the only case where
-    /// an impostor can create a duplicate — which also guarantees we never strip an
-    /// app's *last* window, so this pass can't erase an app from the dock. For such
-    /// an app we ask AX which of its windows are real, standalone ones and keep only
-    /// those. When AX can't answer for a pid, `standaloneWindowIDs` is nil and we
-    /// keep all of its windows — the conservative fallback the rest of this file uses.
-    /// Only *on-screen* windows are gated: the impostors are always visible, while a
-    /// minimized/⌘-hidden window is off-screen and frequently absent from AX's window
-    /// list, so checking it here would wrongly strip a real, restorable window.
-    private func filteringToStandaloneWindows(_ windows: [WindowInfo],
-                                              cache: inout [pid_t: [AXUIElement]]) -> [WindowInfo] {
-        guard WindowAX.isTrusted else { return windows }
-        var countByPID: [pid_t: Int] = [:]
-        for window in windows { countByPID[window.pid, default: 0] += 1 }
-        let multiWindowPIDs = countByPID.filter { $0.value > 1 }.keys
-        guard !multiWindowPIDs.isEmpty else { return windows }
-
-        var standaloneByPID: [pid_t: Set<CGWindowID>] = [:]
-        for pid in multiWindowPIDs {
-            if let ids = standaloneWindowIDs(pid: pid, cache: &cache) { standaloneByPID[pid] = ids }
-        }
-        return windows.filter { window in
-            // Off-screen windows (minimized or ⌘-hidden) are never the impostors this
-            // pass targets — a blocking dialog or a search-suggestions accessory is
-            // always *on screen*. And AX's window list (`kAXWindowsAttribute`) routinely
-            // omits an app's minimized windows, so a minimized window's id is missing
-            // from `standalone` not because it's an impostor but because AX never listed
-            // it; gating on those ids would wrongly strip a real, restorable window from
-            // a multi-window app (the repro: a second VSCode window minimized while
-            // another stays open → it vanished from the dock, leaving nothing to click
-            // to bring it back). The phantom filter above already vetted off-screen
-            // windows, so keep them here unconditionally.
-            guard window.isOnscreen else { return true }
-            // Not a gated pid, or AX couldn't answer for it → keep.
-            guard let standalone = standaloneByPID[window.pid] else { return true }
-            return standalone.contains(window.windowID)
+            guard WindowFilter.isRealWindow(layer: info[kCGWindowLayer as String] as? Int ?? -1,
+                                            alpha: info[kCGWindowAlpha as String] as? Double ?? 1,
+                                            width: bounds.width, height: bounds.height) else { return nil }
+            let membership = spaces(for: wid)
+            return WindowInfo(windowID: wid, pid: pid,
+                              ownerName: info[kCGWindowOwnerName as String] as? String ?? "",
+                              bundleID: bundleIDByPID[pid], spaceIDs: membership ?? [], bounds: bounds,
+                              isOnscreen: info[kCGWindowIsOnscreen as String] as? Bool ?? false,
+                              isHidden: hiddenPIDs.contains(pid), spaceMembershipKnown: membership != nil)
         }
     }
 
-    /// The CGWindowIDs of an app's real, standalone windows: its top-level AX windows
-    /// that pass `WindowFilter.isStandaloneWindow` (role "AXWindow", not a dialog).
-    /// A sheet is excluded for free — it isn't a top-level AX window, so its id never
-    /// lands here; a dialog panel or a non-window accessory (an `AXScrollArea`) in the
-    /// list is excluded by the predicate. Returns nil (→ keep everything) when AX is
-    /// untrusted, the app exposes no AX windows, or *none* of its top-level windows is
-    /// a standalone window (so we never erase an app on a fluke). Reuses the per-pid AX
-    /// window memo built for the minimized check.
-    private func standaloneWindowIDs(pid: pid_t, cache: inout [pid_t: [AXUIElement]]) -> Set<CGWindowID>? {
-        guard WindowAX.isTrusted else { return nil }
-        let axWindows: [AXUIElement]
-        if let cached = cache[pid] {
-            axWindows = cached
-        } else {
-            axWindows = WindowAX.windows(of: pid)
-            cache[pid] = axWindows
+    /// One AX pass per app, all within `deadline`. Apps are read in window-server
+    /// order, which favors visible/frontmost apps when another app uses the budget
+    /// up. What the answers mean is `WindowFilter.judge`'s decision, not this one's.
+    private func judge(_ candidates: [WindowInfo], visibleSpaces: Set<SpaceID>,
+                       remembered: Set<WindowFilter.Key>, deadline: TimeInterval,
+                       slowest: inout (app: String, seconds: TimeInterval)) -> [WindowFilter.Judged] {
+        let trusted = WindowAX.isTrusted
+        var judged: [CGWindowID: WindowFilter.Judged] = [:]
+        var visited: Set<pid_t> = []
+        for owner in candidates where visited.insert(owner.pid).inserted {
+            var windows = candidates.filter { $0.pid == owner.pid }
+            var accessibility = trusted ? WindowFilter.Accessibility.unanswered : .untrusted
+            let asked = ProcessInfo.processInfo.systemUptime
+            if trusted, let kinds = accessibilityKinds(of: &windows, deadline: deadline) {
+                accessibility = .listed(kinds)
+            }
+            let took = ProcessInfo.processInfo.systemUptime - asked
+            if took > slowest.seconds { slowest = (owner.bundleID ?? owner.ownerName, took) }
+            for entry in WindowFilter.judge(windows, accessibility: accessibility,
+                                            visibleSpaces: visibleSpaces, remembered: remembered) {
+                judged[entry.window.windowID] = entry
+            }
         }
-        guard !axWindows.isEmpty else { return nil }
-        var ids = Set<CGWindowID>()
-        for window in axWindows where WindowAX.isStandaloneWindow(window) {
-            if let id = WindowAX.cgWindowID(of: window) { ids.insert(id) }
-        }
-        return ids.isEmpty ? nil : ids
+        return candidates.compactMap { judged[$0.windowID] }
     }
 
-    /// Whether `windowID` is a minimized (Dock) window, via Accessibility. The
-    /// app's AX window list is fetched once per pid and reused through `cache`.
-    /// Returns false when AX is untrusted or the window isn't an AX window (e.g. a
-    /// window-server placeholder), so only genuine minimized windows survive the
-    /// phantom filter.
-    private func isMinimized(windowID: CGWindowID, pid: pid_t,
-                             cache: inout [pid_t: [AXUIElement]]) -> Bool {
-        guard WindowAX.isTrusted else { return false }
-        let axWindows: [AXUIElement]
-        if let cached = cache[pid] {
-            axWindows = cached
-        } else {
-            axWindows = WindowAX.windows(of: pid)
-            cache[pid] = axWindows
+    /// What Accessibility says about the windows of one app that it lists, or nil
+    /// when the app gave no complete answer in time. Marks the windows it reports
+    /// as minimized. Every AX object is released before this returns.
+    private func accessibilityKinds(of windows: inout [WindowInfo],
+                                    deadline: TimeInterval) -> [CGWindowID: WindowFilter.AXKind]? {
+        guard let pid = windows.first?.pid, ProcessInfo.processInfo.systemUptime < deadline,
+              let elements = WindowAX.availableWindows(of: pid) else { return nil }
+        var kinds: [CGWindowID: WindowFilter.AXKind] = [:]
+        for element in elements {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            guard let id = WindowAX.cgWindowID(of: element),
+                  let index = windows.firstIndex(where: { $0.windowID == id }) else { continue }
+            let window = windows[index]
+            let minimizedStatus = window.isOnscreen ? false : WindowAX.minimizedStatus(of: element)
+            if minimizedStatus == true {
+                windows[index] = WindowInfo(windowID: id, pid: pid, ownerName: window.ownerName,
+                    bundleID: window.bundleID, spaceIDs: window.spaceIDs, bounds: window.bounds,
+                    isOnscreen: window.isOnscreen, isMinimized: true, isHidden: window.isHidden,
+                    spaceMembershipKnown: window.spaceMembershipKnown)
+            }
+            let subrole = WindowAX.subrole(of: element)
+            // While a window minimizes, the window server can still report it on screen.
+            let minimized = minimizedStatus == true
+                || (window.isOnscreen && subrole == "AXDialog" && WindowAX.isMinimized(element))
+            kinds[id] = WindowFilter.AXKind(role: WindowAX.role(of: element), subrole: subrole,
+                                           isModal: WindowAX.modalStatus(of: element), isMinimized: minimized)
         }
-        guard let window = WindowAX.firstWindow(windowID: windowID, in: axWindows) else { return false }
-        return WindowAX.isMinimized(window)
+        return kinds
     }
 
-    private func spaces(for windowID: CGWindowID) -> [SpaceID] {
+    private func spaces(for windowID: CGWindowID) -> [SpaceID]? {
         let ids = [NSNumber(value: windowID)] as CFArray
         guard let raw = CGSCopySpacesForWindows(cid, kCGSSpaceAll, ids)?.takeRetainedValue() as? [NSNumber] else {
-            return []
+            return nil
         }
         return raw.map { $0.uint64Value }
     }

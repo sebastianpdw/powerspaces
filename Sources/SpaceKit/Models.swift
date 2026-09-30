@@ -17,6 +17,8 @@ public struct WindowInfo: Equatable, Sendable {
     /// The Space(s) this window belongs to. Usually one; can be several if
     /// the user pinned the window to "All Desktops".
     public let spaceIDs: [SpaceID]
+    /// False means the membership query failed, rather than returning no Spaces.
+    public let spaceMembershipKnown: Bool
     /// The window's screen rectangle (global, top-left origin). Used to decide
     /// which physical *display* a window is on for the per-display dock — macOS
     /// only reliably reports Space membership for the active display, so display
@@ -34,18 +36,20 @@ public struct WindowInfo: Equatable, Sendable {
     /// hidden app's windows go off-screen without being minimized, so — like a
     /// minimized window — a hidden window is a real, user-facing window that still
     /// belongs to its desktop's dock. Tracking it separately keeps such a window
-    /// from being mistaken for an off-screen placeholder (which the phantom filter
-    /// drops), and lets the dock optionally show or hide these.
+    /// from being mistaken for an off-screen leftover when Accessibility cannot
+    /// be asked, and lets the dock optionally show or hide these.
     public let isHidden: Bool
 
     public init(windowID: CGWindowID, pid: pid_t, ownerName: String, bundleID: String?,
                 spaceIDs: [SpaceID], bounds: CGRect = .zero,
-                isOnscreen: Bool = true, isMinimized: Bool = false, isHidden: Bool = false) {
+                isOnscreen: Bool = true, isMinimized: Bool = false, isHidden: Bool = false,
+                spaceMembershipKnown: Bool = true) {
         self.windowID = windowID
         self.pid = pid
         self.ownerName = ownerName
         self.bundleID = bundleID
         self.spaceIDs = spaceIDs
+        self.spaceMembershipKnown = spaceMembershipKnown
         self.bounds = bounds
         self.isOnscreen = isOnscreen
         self.isMinimized = isMinimized
@@ -53,6 +57,18 @@ public struct WindowInfo: Equatable, Sendable {
     }
 
     public func isOn(_ space: SpaceID) -> Bool { spaceIDs.contains(space) }
+
+    public var isReal: Bool { !spaceIDs.isEmpty || isOnVisibleSpace || !spaceMembershipKnown }
+
+    public func isVisible(onSpace space: SpaceID, display: CGRect? = nil) -> Bool {
+        if let display, !isOnDisplay(display) { return false }
+        if !spaceIDs.isEmpty { return isOn(space) }
+        return display != nil && isOnscreen
+    }
+
+    public func canClose(onSpace space: SpaceID, display: CGRect? = nil) -> Bool {
+        spaceMembershipKnown && isOn(space) && (display.map(isOnDisplay) ?? true)
+    }
 
     /// The window's center, used for display membership.
     public var center: CGPoint { CGPoint(x: bounds.midX, y: bounds.midY) }
@@ -64,7 +80,9 @@ public struct WindowInfo: Equatable, Sendable {
     public var isOnVisibleSpace: Bool { isOnscreen || isMinimized || isHidden }
 
     /// Whether this window sits on the given display rectangle (by its center).
-    public func isOnDisplay(_ display: CGRect) -> Bool { display.contains(center) }
+    public func isOnDisplay(_ display: CGRect) -> Bool {
+        bounds.width > 0 && bounds.height > 0 && display.contains(center)
+    }
 }
 
 /// A display and the Space currently visible on it. With "Displays have separate
@@ -117,11 +135,25 @@ public struct SpaceSnapshot: Equatable, Sendable {
     /// from "running but window-less" (Finder after a quit auto-relaunches with
     /// no windows) — this distinguishes a cold launch from a new-window request.
     public let runningBundleIDs: Set<String>
+    /// Pids that own at least one *candidate* window (one that passed the geometry
+    /// filter), whether or not it was judged real — always including the owners of
+    /// `windows`. An app whose only surfaces are leftovers or dialogs has no entry
+    /// in `windows`, yet it is not "window-less": it must not be offered on every
+    /// desktop as an app without windows.
+    public let windowOwnerPIDs: Set<pid_t>
 
-    public init(activeSpaceID: SpaceID, windows: [WindowInfo], runningBundleIDs: Set<String> = []) {
+    public init(activeSpaceID: SpaceID, windows: [WindowInfo], runningBundleIDs: Set<String> = [],
+                windowOwnerPIDs: Set<pid_t> = []) {
         self.activeSpaceID = activeSpaceID
         self.windows = windows
         self.runningBundleIDs = runningBundleIDs
+        self.windowOwnerPIDs = windowOwnerPIDs.union(windows.map(\.pid))
+    }
+
+    /// The result of one scan: only the windows judged real, but every candidate's owner.
+    public init(activeSpaceID: SpaceID, judged: [WindowFilter.Judged], runningBundleIDs: Set<String> = []) {
+        self.init(activeSpaceID: activeSpaceID, windows: judged.filter { $0.verdict.isReal }.map(\.window),
+                  runningBundleIDs: runningBundleIDs, windowOwnerPIDs: Set(judged.map(\.window.pid)))
     }
 
     public func windows(onSpace space: SpaceID) -> [WindowInfo] {
@@ -140,8 +172,8 @@ public struct SpaceSnapshot: Equatable, Sendable {
         windows.filter { target.matches($0) && $0.isOn(space) }
     }
 
-    /// `target`'s windows that live on a *real* Space — i.e. excluding the
-    /// spaceless off-screen phantoms an app can leave behind (empty `spaceIDs`).
+    /// Known-Space windows, plus onscreen/minimized/hidden windows whose membership
+    /// is temporarily unavailable. Only spaceless off-screen placeholders are ignored.
     /// Those placeholders belong to no desktop at all (the canonical case is an
     /// Electron app like Claude after you ✕ its last real window: the process
     /// lingers, owning only `space[]` ghost windows), so they must not read as
@@ -149,7 +181,7 @@ public struct SpaceSnapshot: Equatable, Sendable {
     /// on to tell a genuine window (here or on another desktop) from a windowless
     /// instance that can simply be reused.
     public func realWindows(of target: AppTarget) -> [WindowInfo] {
-        windows.filter { target.matches($0) && !$0.spaceIDs.isEmpty }
+        windows.filter { target.matches($0) && $0.isReal }
     }
 
     /// Is the target's app process alive right now (with or without windows)?
@@ -168,7 +200,7 @@ public struct SpaceSnapshot: Equatable, Sendable {
     public func droppingHiddenWindows() -> SpaceSnapshot {
         SpaceSnapshot(activeSpaceID: activeSpaceID,
                       windows: windows.filter { !$0.isHidden },
-                      runningBundleIDs: runningBundleIDs)
+                      runningBundleIDs: runningBundleIDs, windowOwnerPIDs: windowOwnerPIDs)
     }
 }
 

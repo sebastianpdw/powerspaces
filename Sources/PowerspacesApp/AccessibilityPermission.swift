@@ -31,6 +31,24 @@ enum AccessibilityPermission {
     /// time, since a reset (or a grant in System Settings) changes it underneath us.
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
+    /// Sending synthetic input is checked independently from window access.
+    /// Neither this read nor the engine's permission checks show a prompt.
+    static var hasPostEventAccess: Bool { CGPreflightPostEventAccess() }
+    @MainActor private static var requestedPostEventAccess = false
+
+    /// Ask for the permission required by fast switching. Request event access
+    /// after AX approval, once per launch; only a fresh user action may retry.
+    @MainActor static func promptForFastSwitch(userInitiated: Bool = false) {
+        guard isTrusted else {
+            if userInitiated { prompt() }
+            return
+        }
+        guard !hasPostEventAccess else { return }
+        guard userInitiated || !requestedPostEventAccess else { return }
+        requestedPostEventAccess = true
+        _ = CGRequestPostEventAccess()
+    }
+
     /// Ask macOS to show its Accessibility prompt (the dialog with an "Open System
     /// Settings" button) when we're not already trusted. A no-op when already
     /// granted. Used by the first-run welcome window and the cold-launch path.
